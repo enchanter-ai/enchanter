@@ -1,17 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 440" width="1200" height="440"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" width="1200" height="480"
      role="img" aria-label="Enchanter — real-time MCP observability monitor"
      font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
      font-size="13">
+  <defs>
+    <!-- Subtle drop shadow under the window -->
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="110%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <!-- Title-bar gradient: darker top, slightly lighter bottom -->
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2a2a2c"/>
+      <stop offset="100%" stop-color="#1c1c1e"/>
+    </linearGradient>
+  </defs>
+
   <style><![CDATA[
     /* Match the TUI palette one-for-one */
-    .bg     { fill: #0d1117; }
-    .border { stroke: #44484f; fill: none; stroke-width: 1; }
     .label  { fill: #788087; }
     .body   { fill: #b4b9c3; }
     .amber  { fill: #d29922; font-weight: bold; }
     .red    { fill: #f85149; }
     .green  { fill: #6bb04a; font-weight: bold; }
     .violet { fill: #7c5cdb; font-weight: bold; }
+    .cyan   { fill: #4ec8e5; }
+    .magenta{ fill: #c76b7a; }
+    .gold   { fill: #e8d27a; }
     .pech   { fill: #b36a2e; }
     .emu    { fill: #c9925e; }
     .hydra  { fill: #6bb04a; }
@@ -22,103 +35,117 @@
     .djinn  { fill: #3d5ac4; }
     .gorgon { fill: #c76b7a; }
     .wixie  { fill: #7c5cdb; }
+    .titlebar-text { fill: #b4b9c3; letter-spacing: 0.3px; }
 
-    /* Pure-CSS hover: cards and buttons grow when you point at them.
-       Visible when the SVG is opened directly (or via <object>); README's
-       <img> tag won't propagate pointer events into the SVG, but the
-       click-through to docs/index.html does. */
-    .card, .btn { transition: transform 0.18s ease-out; transform-box: fill-box; transform-origin: center; cursor: pointer; }
+    /* Card + button hover-grow. Note: only fires when the SVG is loaded
+       directly (open hero.svg in a tab) — README's <img> embedding does
+       not forward pointer events into the SVG. */
+    .card, .btn {
+      transition: transform 0.18s ease-out;
+      transform-box: fill-box;
+      transform-origin: center;
+      cursor: pointer;
+    }
     .card:hover { transform: scale(1.06); }
     .btn:hover  { transform: scale(1.10); }
     .btn-bg     { fill: #1c1c1e; stroke: #44484f; stroke-width: 1; }
     .btn:hover .btn-bg { stroke: #7c5cdb; }
+    .card-bg    { fill: #161b22; stroke: #44484f; stroke-width: 1; }
 
-    /* LIVE blink — 700ms on/off */
-    .blink { animation: blink 1.4s steps(2, jump-none) infinite; }
-    @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+    /* Slow LIVE fade — 2s, ease in and out, opacity 1 -> 0 -> 1 */
+    .blink { animation: blink 2.0s ease-in-out infinite; }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0; }
+    }
 
-    /* Active phase pulse */
-    .phase-active { animation: pulse 1.6s ease-in-out infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+    /* Active phase pulse — slower, more breath */
+    .phase-active { animation: pulse 2.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
   ]]></style>
 
-  <!-- Background -->
-  <rect class="bg" width="1200" height="440"/>
+  <!-- ============================================================
+       Mac window chrome
+       ============================================================ -->
+  <g filter="url(#shadow)">
+    <!-- Window body -->
+    <rect x="20" y="24" width="1160" height="436" rx="10" ry="10" fill="#0d1117"/>
+    <!-- Title bar (top 32px) -->
+    <path d="M20,34 Q20,24 30,24 L1170,24 Q1180,24 1180,34 L1180,56 L20,56 Z" fill="url(#titleGrad)"/>
+    <!-- Title bar separator -->
+    <line x1="20" y1="56" x2="1180" y2="56" stroke="#44484f" stroke-width="1"/>
+    <!-- Traffic lights -->
+    <circle cx="44" cy="40" r="6.5" fill="#ff5f56" stroke="#e0443e" stroke-width="0.5"/>
+    <circle cx="64" cy="40" r="6.5" fill="#ffbd2e" stroke="#dea123" stroke-width="0.5"/>
+    <circle cx="84" cy="40" r="6.5" fill="#27c93f" stroke="#1aab29" stroke-width="0.5"/>
+    <!-- Centered title -->
+    <text x="600" y="44" text-anchor="middle" class="titlebar-text" font-size="12">enchanter — inspector</text>
+  </g>
 
   <!-- ============================================================
-       Outer rounded frame  ╭ Enchanter ─ LIVE … hints ╮
+       Inspector content (inside the window body, below title bar)
        ============================================================ -->
-  <rect x="20" y="24" width="1160" height="392" rx="8" ry="8" class="border"/>
 
   <!-- Header band: violet Enchanter, dim ─, blinking green LIVE, hints right -->
-  <text x="44" y="42" class="violet">Enchanter</text>
-  <text x="120" y="42" class="label">─</text>
-  <text x="138" y="42" class="green blink">LIVE</text>
-  <text x="1156" y="42" text-anchor="end" class="label">q quit · / filter · p pause · S sort · ↑↓ scroll</text>
+  <g transform="translate(0, 30)">
+    <text x="44" y="50" class="violet" font-size="14">Enchanter</text>
+    <text x="124" y="50" class="label">─</text>
+    <text x="142" y="50" class="green blink" font-size="14">LIVE</text>
+    <text x="1156" y="50" text-anchor="end" class="label">q quit · / filter · p pause · S sort · ↑↓ scroll</text>
+  </g>
 
-  <!-- ============================================================
-       Golden-signal cards — sharp inner corners, exact 14ch widths
-       ============================================================ -->
-  <g transform="translate(40, 70)">
-    <!-- card 1: turns -->
+  <!-- Golden-signal cards -->
+  <g transform="translate(40, 100)">
     <g class="card">
-      <rect class="btn-bg" x="0" y="0" width="200" height="56" rx="2"/>
+      <rect class="card-bg" x="0" y="0" width="200" height="56" rx="3"/>
       <text x="14" y="18" class="label">turns</text>
       <text x="100" y="40" text-anchor="middle" class="body">25 ± 3</text>
     </g>
-    <!-- card 2: spent -->
     <g class="card" transform="translate(220, 0)">
-      <rect class="btn-bg" x="0" y="0" width="200" height="56" rx="2"/>
+      <rect class="card-bg" x="0" y="0" width="200" height="56" rx="3"/>
       <text x="14" y="18" class="label">spent</text>
       <text x="100" y="40" text-anchor="middle" class="body">$0.42</text>
     </g>
-    <!-- card 3: security -->
     <g class="card" transform="translate(440, 0)">
-      <rect class="btn-bg" x="0" y="0" width="200" height="56" rx="2"/>
+      <rect class="card-bg" x="0" y="0" width="200" height="56" rx="3"/>
       <text x="14" y="18" class="label">security</text>
       <text x="100" y="40" text-anchor="middle" class="body">0</text>
     </g>
-    <!-- card 4: drift -->
     <g class="card" transform="translate(660, 0)">
-      <rect class="btn-bg" x="0" y="0" width="200" height="56" rx="2"/>
+      <rect class="card-bg" x="0" y="0" width="200" height="56" rx="3"/>
       <text x="14" y="18" class="label">drift</text>
       <text x="100" y="40" text-anchor="middle" class="body">0</text>
     </g>
-    <!-- card 5: p99 -->
     <g class="card" transform="translate(880, 0)">
-      <rect class="btn-bg" x="0" y="0" width="200" height="56" rx="2"/>
+      <rect class="card-bg" x="0" y="0" width="200" height="56" rx="3"/>
       <text x="14" y="18" class="label">p99</text>
       <text x="100" y="40" text-anchor="middle" class="body">7ms</text>
     </g>
   </g>
 
-  <!-- ============================================================
-       Plugins panel  |  Recent events panel
-       ============================================================ -->
-  <g transform="translate(40, 162)">
+  <!-- Plugins panel | Recent events panel -->
+  <g transform="translate(40, 192)">
     <text x="0"   y="0" class="label">plugins</text>
     <text x="600" y="0" class="label">recent events</text>
 
-    <!-- plugin rows: ·color name spark metric -->
     <g transform="translate(0, 22)">
-      <text x="0"   class="pech">●</text><text x="14"  class="pech">pech</text>   <text x="78"  class="pech">▁▂▃▄▅▆</text>      <text x="148" class="body">$0.42</text>
-      <text x="0"   y="20" class="emu">●</text><text x="14"  y="20" class="emu">emu</text>     <text x="78"  y="20" class="emu">▁▁▂▄▅▇</text>      <text x="148" y="20" class="body">25 ± 3 turns</text>
-      <text x="0"   y="40" class="hydra">●</text><text x="14"  y="40" class="hydra">hydra</text> <text x="78"  y="40" class="hydra">▁▁▁▁▁▂</text>    <text x="148" y="40" class="body">0 vetoes</text>
-      <text x="0"   y="60" class="sylph">●</text><text x="14"  y="60" class="sylph">sylph</text> <text x="78"  y="60" class="sylph">▁▁▂▃▄▆</text>    <text x="148" y="60" class="body">clean ✓</text>
-      <text x="0"   y="80" class="lich">●</text><text x="14"   y="80" class="lich">lich</text>   <text x="78"  y="80" class="lich">▁▁▁▂▃▄</text>     <text x="148" y="80" class="body">0 clean ✓</text>
-      <text x="0"   y="100" class="naga">●</text><text x="14"  y="100" class="naga">naga</text> <text x="78"  y="100" class="naga">▁▁▁▁▂▃</text>     <text x="148" y="100" class="body">clean ✓</text>
-      <text x="0"   y="120" class="crow">●</text><text x="14"  y="120" class="crow">crow</text> <text x="78"  y="120" class="crow">▁▂▃▄▅▆</text>     <text x="148" y="120" class="body">0.84 trust</text>
-      <text x="0"   y="140" class="djinn">●</text><text x="14" y="140" class="djinn">djinn</text> <text x="78" y="140" class="djinn">▁▁▁▁▁▁</text>  <text x="148" y="140" class="body">on task ✓</text>
-      <text x="0"   y="160" class="gorgon">●</text><text x="14" y="160" class="gorgon">gorgon</text> <text x="78" y="160" class="gorgon">▁▂▂▃▄▅</text> <text x="148" y="160" class="body">router.ts (top hotspot)</text>
+      <text x="0" class="pech">●</text><text x="14" class="pech">pech</text>     <text x="78" class="pech">▁▂▃▄▅▆</text>      <text x="148" class="body">$0.42</text>
+      <text x="0" y="20" class="emu">●</text><text x="14" y="20" class="emu">emu</text>       <text x="78" y="20" class="emu">▁▁▂▄▅▇</text>      <text x="148" y="20" class="body">25 ± 3 turns</text>
+      <text x="0" y="40" class="hydra">●</text><text x="14" y="40" class="hydra">hydra</text> <text x="78" y="40" class="hydra">▁▁▁▁▁▂</text>    <text x="148" y="40" class="body">0 vetoes</text>
+      <text x="0" y="60" class="sylph">●</text><text x="14" y="60" class="sylph">sylph</text> <text x="78" y="60" class="sylph">▁▁▂▃▄▆</text>    <text x="148" y="60" class="body">clean ✓</text>
+      <text x="0" y="80" class="lich">●</text><text x="14" y="80" class="lich">lich</text>    <text x="78" y="80" class="lich">▁▁▁▂▃▄</text>     <text x="148" y="80" class="body">0 clean ✓</text>
+      <text x="0" y="100" class="naga">●</text><text x="14" y="100" class="naga">naga</text>  <text x="78" y="100" class="naga">▁▁▁▁▂▃</text>    <text x="148" y="100" class="body">clean ✓</text>
+      <text x="0" y="120" class="crow">●</text><text x="14" y="120" class="crow">crow</text>  <text x="78" y="120" class="crow">▁▂▃▄▅▆</text>    <text x="148" y="120" class="body">0.84 trust</text>
+      <text x="0" y="140" class="djinn">●</text><text x="14" y="140" class="djinn">djinn</text> <text x="78" y="140" class="djinn">▁▁▁▁▁▁</text> <text x="148" y="140" class="body">on task ✓</text>
+      <text x="0" y="160" class="gorgon">●</text><text x="14" y="160" class="gorgon">gorgon</text> <text x="78" y="160" class="gorgon">▁▂▂▃▄▅</text> <text x="148" y="160" class="body">router.ts (top hotspot)</text>
     </g>
 
-    <!-- events column -->
     <g transform="translate(600, 22)">
-      <text x="0"  class="label">36.585</text> <text x="56" class="label">●</text> <text x="68"  class="label">lc.trust-gate</text>  <text x="180" class="body">sampling_depth=0</text>
-      <text x="0"  y="20" class="label">36.585</text> <text x="56" y="20" class="label">●</text> <text x="68"  y="20" class="label">lc.pre-disp</text>    <text x="180" y="20" class="body">sampling_depth=0</text>
-      <text x="0"  y="40" class="label">36.585</text> <text x="56" y="40" class="label">●</text> <text x="68"  y="40" class="label">lc.dispatch</text>    <text x="180" y="40" class="body">sampling_depth=0</text>
-      <text x="0"  y="60" class="label">36.592</text> <text x="56" y="60" class="wixie">●</text> <text x="68"  y="60" class="wixie">tool.result</text>    <text x="180" y="60" class="body">t=list_directory v=fs</text>
-      <text x="0"  y="80" class="label">36.593</text> <text x="56" y="80" class="pech">●</text>  <text x="68"  y="80" class="pech">pech.ledger</text>     <text x="180" y="80" class="body">v=fs in=0 out=0</text>
+      <text x="0"  class="label">36.585</text> <text x="56"  class="label">●</text> <text x="68"  class="label">lc.trust-gate</text>  <text x="180" class="body">sampling_depth=0</text>
+      <text x="0"  y="20" class="label">36.585</text> <text x="56" y="20" class="label">●</text>  <text x="68" y="20" class="label">lc.pre-disp</text>    <text x="180" y="20" class="body">sampling_depth=0</text>
+      <text x="0"  y="40" class="label">36.585</text> <text x="56" y="40" class="label">●</text>  <text x="68" y="40" class="label">lc.dispatch</text>    <text x="180" y="40" class="body">sampling_depth=0</text>
+      <text x="0"  y="60" class="label">36.592</text> <text x="56" y="60" class="wixie">●</text>  <text x="68" y="60" class="wixie">tool.result</text>    <text x="180" y="60" class="body">t=list_directory v=fs</text>
+      <text x="0"  y="80" class="label">36.593</text> <text x="56" y="80" class="pech">●</text>   <text x="68" y="80" class="pech">pech.ledger</text>     <text x="180" y="80" class="body">v=fs in=0 out=0</text>
       <text x="0"  y="100" class="label">36.901</text> <text x="56" y="100" class="wixie">●</text> <text x="68" y="100" class="wixie">tool.call</text>    <text x="180" y="100" class="body">t=read_file</text>
       <text x="0"  y="120" class="label">36.901</text> <text x="56" y="120" class="djinn">●</text> <text x="68" y="120" class="djinn">djinn.anchor</text> <text x="180" y="120" class="body">intent=…</text>
       <text x="0"  y="140" class="label">37.012</text> <text x="56" y="140" class="hydra">●</text> <text x="68" y="140" class="hydra">hydra.veto</text>   <text x="180" y="140" class="red">p=h-rm-rf-root</text>
@@ -126,11 +153,9 @@
     </g>
   </g>
 
-  <!-- ============================================================
-       Phase bar (one row): ✓anchor ✓trust-gate ●dispatch …
-       ============================================================ -->
-  <g transform="translate(40, 366)">
-    <text x="0" class="label">phase</text>
+  <!-- Phase bar -->
+  <g transform="translate(40, 396)">
+    <text x="0"   class="label">phase</text>
     <text x="48"  class="green">✓anchor</text>
     <text x="120" class="green">✓trust-gate</text>
     <text x="220" class="green">✓pre-disp</text>
@@ -140,10 +165,8 @@
     <text x="560" class="label">cross-sess</text>
   </g>
 
-  <!-- ============================================================
-       Action buttons — pure CSS hover-grow, mirrors GH Pages demo
-       ============================================================ -->
-  <g transform="translate(820, 358)">
+  <!-- Action buttons (hover-grow, see CSS) -->
+  <g transform="translate(820, 388)">
     <g class="btn">
       <rect class="btn-bg" x="0" y="0" width="100" height="22" rx="3"/>
       <text x="50" y="15" text-anchor="middle" class="body">Run Demo</text>
@@ -158,11 +181,14 @@
     </g>
   </g>
 
-  <!-- ============================================================
-       Footer pill: LIVE · 0 pending · sort: recent · up 1:42
-       ============================================================ -->
-  <text x="1156" y="406" text-anchor="end">
-    <tspan class="green blink">LIVE</tspan>
-    <tspan class="label"> · 0 pending · sort: recent · up 1:42</tspan>
+  <!-- Footer pill: each segment a different color (cyan/violet/magenta/gold) -->
+  <text x="1156" y="446" text-anchor="end">
+    <tspan class="cyan">events 1.2k</tspan>
+    <tspan class="label"> · </tspan>
+    <tspan class="violet">0 pending</tspan>
+    <tspan class="label"> · </tspan>
+    <tspan class="magenta">sort: recent</tspan>
+    <tspan class="label"> · </tspan>
+    <tspan class="gold">up 1:42</tspan>
   </text>
 </svg>
