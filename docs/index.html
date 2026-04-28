@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enchanter — Live MCP Observability</title>
+
+  <!-- OG / Twitter -->
+  <meta property="og:title"       content="Enchanter — Live MCP Observability">
+  <meta property="og:description" content="Interactive demo of the Enchanter v0.4 CLI inspector. Real-time plugin telemetry, veto tracking, and phase lifecycle inside a macOS Terminal chrome.">
+  <meta property="og:url"         content="https://enchanter-ai.github.io/enchanter">
+  <meta property="og:type"        content="website">
+  <meta name="twitter:card"        content="summary_large_image">
+  <meta name="twitter:title"       content="Enchanter — Live MCP Observability">
+  <meta name="twitter:description" content="Interactive inspector demo for Enchanter v0.4.">
+
+  <!-- Fonts — only external resource -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════
+     macOS Terminal window
+═══════════════════════════════════════════════════ -->
+<div id="window">
+
+  <!-- Title bar -->
+  <div id="titlebar">
+    <div class="traffic-lights">
+      <div class="dot red"    title="close"></div>
+      <div class="dot yellow" title="minimize"></div>
+      <div class="dot green"  title="zoom"></div>
+    </div>
+    <span id="bar-title">Enchanter — Inspector</span>
+    <div class="bar-buttons">
+      <button class="bar-btn" id="btn-demo">[ Run demo ]</button>
+      <button class="bar-btn" id="btn-stress">[ Run stress test ]</button>
+      <button class="bar-btn" id="btn-pause">[ Pause ]</button>
+    </div>
+  </div>
+
+  <!-- Inspector body -->
+  <div id="inspector">
+
+    <!-- Header line -->
+    <div id="header-line">
+      <div id="header-left">
+        <span class="header-title">Enchanter</span>
+        <span class="live-badge">● live</span>
+        <span id="elapsed" aria-live="polite" aria-label="elapsed time">elapsed=00:00.000</span>
+      </div>
+      <div id="header-right">
+        <span class="kbd">q quit</span>
+        <span class="kbd">/ filter</span>
+        <span class="kbd">p pause</span>
+        <span class="kbd">S sort</span>
+        <span class="kbd">↑↓</span>
+      </div>
+    </div>
+
+    <!-- Mascot — multi-color chibi grimoire (Fix #1) -->
+    <div id="mascot" aria-hidden="true">
+      <svg id="mascot-svg" viewBox="0 0 88 70" width="88" height="70" xmlns="http://www.w3.org/2000/svg"
+           font-family="'JetBrains Mono','Fira Code',monospace" font-size="13">
+        <!-- row 0: gold pages strip -->
+        <text x="8" y="13" fill="#e8d27a">▁▁▁▁▁▁▁</text>
+        <!-- row 1: gold corners + violet body -->
+        <text x="0" y="27" fill="#7c5cdb">╔███████╗</text>
+        <text x="0" y="27" fill="#e8d27a">╔       ╗</text>
+        <!-- row 2: gold frame, violet body, black eyes -->
+        <text x="0" y="41" fill="#7c5cdb">║█ ██ █ ║</text>
+        <text x="0" y="41" fill="#e8d27a">║       ║</text>
+        <rect x="14" y="30" width="8"  height="11" fill="#000" rx="1"/>
+        <rect x="30" y="30" width="8"  height="11" fill="#000" rx="1"/>
+        <!-- row 3: gold corners + violet body -->
+        <text x="0" y="55" fill="#7c5cdb">╚███████╝</text>
+        <text x="0" y="55" fill="#e8d27a">╚       ╝</text>
+        <!-- row 4: violet feet + red ribbon -->
+        <text x="0" y="69" fill="#7c5cdb">█       █</text>
+        <text x="0" y="69" fill="#f85149">    ▎    </text>
+      </svg>
+    </div>
+
+    <!-- Stat cards -->
+    <div id="cards">
+      <div class="card" id="card-turns" role="button" tabindex="0" title="Click to tick down turns left" aria-label="turns left counter">
+        <div class="card-label">turns left</div>
+        <div class="card-value" id="turns-val">47</div>
+        <div class="card-sub"  id="turns-err">± 9</div>
+      </div>
+      <div class="card" id="card-spent" role="button" tabindex="0" title="Click to increment spend" aria-label="spend counter">
+        <div class="card-label">spent</div>
+        <div class="card-value" id="spent-val">$0.12</div>
+        <div class="card-sub">USD</div>
+      </div>
+      <div class="card" id="card-sec" role="button" tabindex="0" title="Click to add a veto" aria-label="security vetoes counter">
+        <div class="card-label">security</div>
+        <div class="card-value" id="veto-val">2 vetoes</div>
+        <div class="card-sub">hydra</div>
+      </div>
+      <div class="card" id="card-drift" role="button" tabindex="0" title="Click to register drift" aria-label="drift counter">
+        <div class="card-label">drift</div>
+        <div class="card-value" id="drift-val">0</div>
+        <div class="card-sub">djinn</div>
+      </div>
+      <div class="card" id="card-p99" role="button" tabindex="0" title="Click to cycle p99 latency" aria-label="p99 latency">
+        <div class="card-label">p99</div>
+        <div class="card-value" id="p99-val">28ms</div>
+        <div class="card-sub">latency</div>
+      </div>
+    </div>
+
+    <!-- Main grid: plugins + events -->
+    <div id="main-grid">
+
+      <!-- Plugins panel -->
+      <div class="panel" id="panel-plugins">
+        <div class="panel-header">plugins</div>
+        <div id="plugins-list">
+
+          <!-- Fix #2: plugin-name colored by plugin palette. Fix #3: one key metric per row -->
+          <div class="plugin-row" data-plugin="pech" role="button" tabindex="0">
+            <span class="plugin-dot" style="background:var(--p-pech)"></span>
+            <span class="plugin-name" style="color:var(--p-pech)">pech</span>
+            <canvas class="plugin-canvas" id="canvas-pech" width="60" height="14" aria-hidden="true"></canvas>
+            <span class="plugin-meta" id="meta-pech">$0.12</span>
+          </div>
+
+          <div class="plugin-row" data-plugin="hydra" role="button" tabindex="0">
+            <span class="plugin-dot" style="background:var(--p-hydra)"></span>
+            <span class="plugin-name" style="color:var(--p-hydra)">hydra</span>
+            <canvas class="plugin-canvas" id="canvas-hydra" width="60" height="14" aria-hidden="true"></canvas>
+            <span class="plugin-meta" id="meta-hydra" style="color:var(--red)">2 vetoes  last: h-rm-rf-root</span>
+          </div>
+
+          <div class="plugin-row" data-plugin="sylph" role="button" tabindex="0">
+            <span class="plugin-dot" style="background:var(--p-sylph)"></span>
+            <span class="plugin-name" style="color:var(--p-sylph)">sylph</span>
+            <canvas class="plugin-canvas" id="canvas-sylph" width="60" height="14" aria-hidden="true"></canvas>
+            <span class="plugin-meta" id="meta-sylph" style="color:var(--red)">1 blocked</span>
+          </div>
+
+          <div class="plugin-row" data-plugin="djinn" role="button" tabindex="0">
+            <span class="plugin-dot" style="background:var(--p-djinn)"></span>
+            <span class="plugin-name" style="color:var(--p-djinn)">djinn</span>
+            <canvas class="plugin-canvas" id="canvas-djinn" width="60" height="14" aria-hidden="true"></canvas>
+            <span class="plugin-meta" id="meta-djinn">on task ✓</span>
+          </div>
+
+          <div class="plugin-row" data-plugin="emu" role="button" tabindex="0">
+            <span class="plugin-dot" style="background:var(--p-emu)"></span>
+            <span class="plugin-name" style="color:var(--p-emu)">emu</span>
+            <canvas class="plugin-canvas" id="canvas-emu" width="60" height="14" aria-hidden="true"></canvas>
+            <span class="plugin-meta" id="meta-emu">47 ± 9 turns</span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Events panel -->
+      <div class="panel" id="panel-events">
+        <div class="panel-header">recent events</div>
+        <div id="events-list" aria-live="polite" aria-label="event log">
+          <!-- populated by JS -->
+        </div>
+      </div>
+
+    </div><!-- /main-grid -->
+
+    <!-- Phase bar -->
+    <div id="phase-bar">
+      <span class="phase-label">phase</span>
+      <span class="phase-seg" data-phase="anchor">
+        <span class="phase-icon">○</span>anchor
+      </span>
+      <span class="phase-seg" data-phase="trust-gate">
+        <span class="phase-icon">○</span>trust-gate
+      </span>
+      <span class="phase-seg" data-phase="pre-disp">
+        <span class="phase-icon">○</span>pre-disp
+      </span>
+      <span class="phase-seg" data-phase="dispatch">
+        <span class="phase-icon">○</span>dispatch
+      </span>
+      <span class="phase-seg" data-phase="post-resp">
+        <span class="phase-icon">○</span>post-resp
+      </span>
+      <span class="phase-seg" data-phase="post-sess">
+        <span class="phase-icon">○</span>post-sess
+      </span>
+      <span class="phase-seg" data-phase="cross-sess">
+        <span class="phase-icon">○</span>cross-sess
+      </span>
+    </div>
+
+    <!-- Footer -->
+    <div id="footer-line">
+      <span><span class="live-badge">LIVE</span> · <span id="pending-count">0</span> pending · sort: recent</span>
+      <span>
+        <a href="https://github.com/enchanter-ai/enchanter" target="_blank" rel="noopener">
+          github.com/enchanter-ai/enchanter
+        </a>
+      </span>
+    </div>
+
+  </div><!-- /inspector -->
+</div><!-- /window -->
+
+<noscript>
+<style>
+  #window { display: none; }
+  .noscript-fallback { font-family: monospace; white-space: pre; color: #b4b9c3; background: #0d1117; padding: 24px; border-radius: 8px; margin: 20px auto; max-width: 900px; }
+</style>
+<div class="noscript-fallback">
+╭─ Enchanter ─ live ───────────────────────────────────── q quit · / filter ─╮
+│   ▕████████                                                                │
+│   ▕█▀█  █▀█                                                                │
+│    ▔▔▔▔▔▔▔                                                                 │
+│  ┌─ turns left ─┐  ┌─ spent ──┐  ┌─ security ─┐  ┌─ drift ─┐  ┌─ p99 ─┐  │
+│  │   47 ± 9     │  │  $0.12   │  │  2 vetoes  │  │    0    │  │ 28ms  │  │
+│  └──────────────┘  └──────────┘  └────────────┘  └─────────┘  └───────┘  │
+│ plugins                                recent events                       │
+│ · pech    ▁▂▃▅▇  $0.12                  06.122 · tool.call                │
+│ · hydra   ▁▁▂▆▇  2 vetoes last:h-rm-rf  06.422 · hydra.veto               │
+│ · sylph   ▁▁▁▂▆  1 blocked              06.476 · sylph.destructive        │
+│ · djinn   ▁▆▁▁▁  on task ✓              06.501 · djinn.anchor             │
+│ · emu     ▂▂▃▄▆  47 ± 9 turns           06.523 · emu.runway               │
+│ phase  ○anchor  ○trust-gate  ○pre-disp  ○dispatch  ○post-resp  ○post-sess │
+╰─────────────────── LIVE · 0 pending · sort: recent ───────────────────────╯
+
+Enable JavaScript for the interactive version.
+</div>
+</noscript>
+
+<script src="script.js"></script>
+</body>
+</html>
