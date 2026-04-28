@@ -699,11 +699,15 @@ export interface GoldenSignals {
 const CARD_WIDTH = 14;
 
 function smallBoxTop(title: string): string {
-  // ┌─ title ──┐  width = CARD_WIDTH
-  const inside = CARD_WIDTH - 2;
-  const titlePart = ` ${A.label}${title}${A.reset} `;
-  const titleVis = visWidth(titlePart);
-  const fill = Math.max(1, inside - titleVis - 1);
+  // ┌─ title ──┐  exact total width = CARD_WIDTH
+  // Layout: ┌ ─ <space title space> <fill ─...─> ┐
+  // Bytes:   1   1                  1            (variable)  1   1
+  const inside = CARD_WIDTH - 2;             // chars between corners
+  const maxTitleChars = inside - 3;          // 1 leading dash + 2 spaces around title
+  const safe = title.length > maxTitleChars ? title.slice(0, maxTitleChars) : title;
+  const titleVis = safe.length + 2;          // " title "
+  const fill = Math.max(0, inside - titleVis - 1);
+  const titlePart = ` ${A.label}${safe}${A.reset} `;
   return `${A.border}${BOX.stl}${BOX.h}${A.reset}${titlePart}${A.border}${BOX.h.repeat(fill)}${BOX.str}${A.reset}`;
 }
 function smallBoxBot(): string {
@@ -737,7 +741,7 @@ export function renderGoldenSignals(s: GoldenSignals, count = 5): string[] {
       const lower = s.turnsMean - s.turnsCI;
       if (lower < 5) accent = A.amber;
     }
-    cards.push({ title: 'turns left', value, accent });
+    cards.push({ title: 'turns', value, accent });
   }
   // 2. spent
   {
