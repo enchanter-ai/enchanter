@@ -159,12 +159,28 @@ function closeIdleClusters(now: number): Cluster[] {
 // ---------------------------------------------------------------------------
 
 function guardW5TrustGate(event: EnchantedEvent): PluginAck {
-  const corpus = JSON.stringify(event.payload ?? {});
+  // Mirror hydra's defense: scan both the JSON-stringified payload AND
+  // a reconstructed command line `<tool> <args>` so W5 patterns
+  // (`git push --force`, `git reset --hard`, `git branch -D`) match even
+  // when the MCP tool-call shape splits tool from args.
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const corpora: string[] = [JSON.stringify(payload)];
+  const tool = typeof payload['tool'] === 'string' ? (payload['tool'] as string) : '';
+  const args = payload['args'];
+  const argString = Array.isArray(args) && args.every((a) => typeof a === 'string')
+    ? (args as string[]).join(' ')
+    : typeof args === 'string'
+      ? args
+      : '';
+  if (tool || argString) {
+    corpora.push(`${tool} ${argString}`.trim());
+  }
 
   for (const pattern of DESTRUCTIVE_OP_PATTERNS) {
     // Reset stateful regex before testing.
     pattern.regex.lastIndex = 0;
-    if (pattern.regex.test(corpus)) {
+    const hit = corpora.some((c) => pattern.regex.test(c));
+    if (hit) {
       // Plain git push (requires_consent = false) is advisory only.
       if (!pattern.requires_consent) {
         return {

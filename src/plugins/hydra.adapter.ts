@@ -80,14 +80,21 @@ export const hydraAdapter: PluginAdapter = {
 function guardActionAtTrustGate(event: EnchantedEvent): PluginAck {
   // Match against multiple corpus views to defeat array-arg evasion:
   //   1. JSON-stringified payload (catches inline string args)
-  //   2. Reconstructed command line if args is an array of strings
-  //      (catches `{tool: "shell.exec", args: ["rm", "-rf", "/"]}` where
-  //       JSON-quoted strings would otherwise prevent regex anchoring)
+  //   2. Reconstructed command line `<tool> <args.join(' ')>` so patterns
+  //      anchored on tool-name boundaries (`git push --force`,
+  //      `curl ... | bash`, `rm -rf /`) match even when MCP splits the
+  //      tool name from its arguments.
   const payload = (event.payload ?? {}) as Record<string, unknown>;
   const corpora: string[] = [JSON.stringify(payload)];
+  const tool = typeof payload['tool'] === 'string' ? (payload['tool'] as string) : '';
   const args = payload['args'];
-  if (Array.isArray(args) && args.every((a) => typeof a === 'string')) {
-    corpora.push((args as string[]).join(' '));
+  const argString = Array.isArray(args) && args.every((a) => typeof a === 'string')
+    ? (args as string[]).join(' ')
+    : typeof args === 'string'
+      ? args
+      : '';
+  if (tool || argString) {
+    corpora.push(`${tool} ${argString}`.trim());
   }
   const cveHits: CvePattern[] = [];
   for (const c of corpora) {

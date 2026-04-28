@@ -11,8 +11,10 @@ import type { LifecyclePhase } from '../orchestration/request-context.js';
 
 const RING_BUFFER_DEFAULT_SIZE = 10_000;
 
-/** Match a topic pattern. Supports `foo.*` wildcard; exact match otherwise. */
+/** Match a topic pattern. Supports `*` (any topic), `foo.*` prefix wildcard,
+ *  or exact match. */
 function topicMatches(pattern: string, topic: string): boolean {
+  if (pattern === '*') return true;
   if (pattern === topic) return true;
   if (pattern.endsWith('.*')) {
     const prefix = pattern.slice(0, -1); // keeps the dot
