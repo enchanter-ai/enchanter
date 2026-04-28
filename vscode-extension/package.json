@@ -1,0 +1,144 @@
+{
+  "name": "enchanter-inspector",
+  "displayName": "Enchanter Inspector",
+  "description": "Live MCP traffic and plugin event inspector for the Enchanter SDK",
+  "version": "0.2.0",
+  "publisher": "enchanter-ai",
+  "icon": "media/icon.png",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/enchanter-ai/enchanter#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/enchanter-ai/enchanter.git",
+    "directory": "client/enchanter/vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/enchanter-ai/enchanter/issues"
+  },
+  "galleryBanner": {
+    "color": "#0d1117",
+    "theme": "dark"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "enchanter",
+    "observability"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "enchanter",
+          "title": "Enchanter",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "enchanter": [
+        {
+          "id": "enchanterPlugins",
+          "name": "Plugins",
+          "when": "enchanter.connected"
+        },
+        {
+          "id": "enchanterEvents",
+          "name": "Events",
+          "when": "enchanter.connected"
+        },
+        {
+          "id": "enchanterPhases",
+          "name": "Phases",
+          "when": "enchanter.connected"
+        },
+        {
+          "id": "enchanterWelcome",
+          "name": "Enchanter",
+          "when": "!enchanter.connected"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "enchanterWelcome",
+        "contents": "Enchanter is not running.\n\nStart the SDK in a terminal:\n\n[Open Terminal Inspector](command:enchanter.openTerminalInspector)\n\n[Connect Manually...](command:enchanter.connect)\n\nThe extension auto-connects to the broadcaster at `ws://localhost:3001/ws`. Configure via `enchanter.wsUrl`."
+      }
+    ],
+    "commands": [
+      {
+        "command": "enchanter.connect",
+        "title": "Enchanter: Connect to Broadcaster"
+      },
+      {
+        "command": "enchanter.disconnect",
+        "title": "Enchanter: Disconnect"
+      },
+      {
+        "command": "enchanter.openTerminalInspector",
+        "title": "Enchanter: Open Terminal Inspector"
+      },
+      {
+        "command": "enchanter.refreshTrees",
+        "title": "Enchanter: Refresh Trees",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "enchanter.showLastVeto",
+        "title": "Enchanter: Show Last Veto Reason"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "enchanter.refreshTrees",
+          "when": "view == enchanterPlugins || view == enchanterEvents || view == enchanterPhases",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Enchanter Inspector",
+      "properties": {
+        "enchanter.wsUrl": {
+          "type": "string",
+          "default": "ws://localhost:3001/ws",
+          "description": "WebSocket URL of the Enchanter dashboard server."
+        },
+        "enchanter.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Connect automatically when the extension activates."
+        },
+        "enchanter.statusBar.show": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Enchanter aggregate pill in the VS Code status bar."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "vscode:prepublish": "npm run compile",
+    "watch": "tsc -p . --watch"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.4.0"
+  }
+}
