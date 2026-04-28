@@ -324,6 +324,7 @@ function render(): void {
     filter: state.filter,
     sort: state.sort,
     scrollBack: state.scrollBack,
+    uptimeSec: (Date.now() - state.startMs) / 1000,
   })));
 
   // ── Pack into rows-tall frame buffer ─────────────────────────────────────

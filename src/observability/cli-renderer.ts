@@ -932,6 +932,7 @@ export interface ModeBannerOpts {
   filter:       string;
   sort:         SidebarSort;
   scrollBack:   number;
+  uptimeSec?:   number;
 }
 
 /** Compact mode word used inside the header title, pre-colored:
@@ -956,12 +957,29 @@ export function headerHints(): string {
   return 'q quit · / filter · p pause · S sort · ↑↓ scroll';
 }
 
+function fmtUptime(sec: number): string {
+  if (sec < 0 || !Number.isFinite(sec)) return '—';
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 /** Mode pill rendered inside the bottom border (§2 footer). */
 export function footerPill(opts: ModeBannerOpts): string {
-  const live = opts.paused ? `${A.amber}PAUSED${A.reset}` : `${A.amber}LIVE${A.reset}`;
+  const live = opts.paused
+    ? `${A.amber}${A.bold}PAUSED${A.reset}`
+    : `${A.green}${A.bold}LIVE${A.reset}`;
   const pending = `${A.label}${opts.pendingCount} pending${A.reset}`;
   const sort = `${A.label}sort: ${opts.sort}${A.reset}`;
-  return `${live} ${A.label}·${A.reset} ${pending} ${A.label}·${A.reset} ${sort}`;
+  const sep = `${A.label}·${A.reset}`;
+  const parts = [live, pending, sort];
+  if (typeof opts.uptimeSec === 'number') {
+    parts.push(`${A.label}up ${fmtUptime(opts.uptimeSec)}${A.reset}`);
+  }
+  return parts.join(` ${sep} `);
 }
 
 // ---------------------------------------------------------------------------
