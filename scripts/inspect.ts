@@ -148,8 +148,8 @@ interface InspectorState {
   phaseLatencies:  number[];   // last N phase wall-times in ms
   phaseStartMs:    number;     // latest phase enter timestamp
   errCount:        number;
-  // LIVE-indicator blink toggle
-  blinkOn:         boolean;
+  // LIVE-indicator blink phase (0..7, advanced ~250ms)
+  blinkPhase:      number;
 }
 
 function makeState(): InspectorState {
@@ -178,7 +178,7 @@ function makeState(): InspectorState {
     phaseLatencies:  [],
     phaseStartMs:    0,
     errCount:        0,
-    blinkOn:         true,
+    blinkPhase:      0,
   };
 }
 
@@ -246,7 +246,7 @@ function render(): void {
     filter: state.filter,
     sort: state.sort,
     scrollBack: state.scrollBack,
-    blinkOn: state.blinkOn,
+    blinkPhase: state.blinkPhase,
   });
   const titleText = `${brandedTitle()} ${A.label}─${A.reset} ${modeWord}`;
   const hintsText = headerHints();
@@ -329,7 +329,7 @@ function render(): void {
     sort: state.sort,
     scrollBack: state.scrollBack,
     uptimeSec: (Date.now() - state.startMs) / 1000,
-    blinkOn: state.blinkOn,
+    totalEvents: state.totalEvents,
   })));
 
   // ── Pack into rows-tall frame buffer ─────────────────────────────────────
@@ -467,11 +467,12 @@ function updatePluginMeta(e: EnchantedEvent): void {
   }
 }
 
-const BLINK_INTERVAL_MS = 700;
+// 8 phases × 250ms ≈ 2.0s full fade-out → fade-in cycle.
+const BLINK_INTERVAL_MS = 250;
 
 function installBlinkTick(): void {
   setInterval(() => {
-    state.blinkOn = !state.blinkOn;
+    state.blinkPhase = (state.blinkPhase + 1) % 8;
     scheduleRender();
   }, BLINK_INTERVAL_MS);
 }

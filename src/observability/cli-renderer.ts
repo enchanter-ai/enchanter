@@ -936,14 +936,38 @@ export interface ModeBannerOpts {
   sort:         SidebarSort;
   scrollBack:   number;
   uptimeSec?:   number;
-  /** When false, the LIVE indicator renders as 4 invisible spaces so the
-   *  layout doesn't reflow. Toggle externally on a ~700ms timer to blink. */
-  blinkOn?:     boolean;
+  /** Blink phase 0..7 (modular). Driven externally on a ~250ms tick.
+   *  The cycle is 0→1→2→3→4→5→6→7→0, mapped to a green-brightness ramp:
+   *  0..3 fade out, 4..7 fade in. ~2s full cycle. Phase 4 is fully hidden. */
+  blinkPhase?:  number;
+  /** Total event count — replaces footer LIVE so we don't show two blinking
+   *  LIVEs at once. The footer becomes a stats strip. */
+  totalEvents?: number;
+}
+
+/** 8-phase green brightness ramp for slow fade blink. Phase 4 = fully hidden,
+ *  phases 0/8 = fully bright. The ramp uses truecolor so a real fade is
+ *  possible (terminal-portable: degrades to grey on 256-color, off on 16). */
+const BLINK_RAMP_GREEN: ReadonlyArray<string> = [
+  tc(107, 176, 74),   // 0 — full bright
+  tc( 92, 152, 64),   // 1
+  tc( 70, 116, 49),   // 2
+  tc( 45,  74, 31),   // 3 — almost gone
+  '',                  // 4 — invisible (caller emits 4 spaces)
+  tc( 45,  74, 31),   // 5
+  tc( 70, 116, 49),   // 6
+  tc( 92, 152, 64),   // 7
+] as const;
+
+function liveAtPhase(phase: number): string {
+  const p = ((phase % 8) + 8) % 8;
+  if (p === 4) return '    ';
+  const color = BLINK_RAMP_GREEN[p] ?? A.green;
+  return `${color}${A.bold}LIVE${A.reset}`;
 }
 
 /** Compact mode word used inside the header title, pre-colored:
- *  green LIVE / amber PAUSED / amber FILTER / amber SCROLLED-BACK.
- *  LIVE blinks via opts.blinkOn — when false, returns 4 spaces (same width). */
+ *  fading green LIVE / amber PAUSED / amber FILTER / amber SCROLLED-BACK. */
 export function headerMode(opts: ModeBannerOpts): string {
   if (opts.scrollBack > 0) return `${A.amber}${A.bold}SCROLLED-BACK${A.reset}`;
   if (opts.filter)         return `${A.amber}${A.bold}FILTER:${opts.filter}${A.reset}`;
@@ -951,8 +975,7 @@ export function headerMode(opts: ModeBannerOpts): string {
     const tag = opts.pendingCount > 0 ? `PAUSED(+${opts.pendingCount})` : 'PAUSED';
     return `${A.amber}${A.bold}${tag}${A.reset}`;
   }
-  if (opts.blinkOn === false) return '    ';
-  return `${A.green}${A.bold}LIVE${A.reset}`;
+  return liveAtPhase(opts.blinkPhase ?? 0);
 }
 
 /** Pre-colored "Enchanter" wordmark — purple body color, bold. */
@@ -975,22 +998,31 @@ function fmtUptime(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-/** Mode pill rendered inside the bottom border (§2 footer). */
+/** Mode pill rendered inside the bottom border (§2 footer).
+ *  Each segment wears a distinct color so the strip reads as a real status
+ *  bar instead of a wall of grey. The header already carries the blinking
+ *  LIVE indicator; the footer instead surfaces the running event total. */
 export function footerPill(opts: ModeBannerOpts): string {
-  let live: string;
-  if (opts.paused) {
-    live = `${A.amber}${A.bold}PAUSED${A.reset}`;
-  } else if (opts.blinkOn === false) {
-    live = '    ';
-  } else {
-    live = `${A.green}${A.bold}LIVE${A.reset}`;
-  }
-  const pending = `${A.label}${opts.pendingCount} pending${A.reset}`;
-  const sort = `${A.label}sort: ${opts.sort}${A.reset}`;
   const sep = `${A.label}·${A.reset}`;
-  const parts = [live, pending, sort];
+  const parts: string[] = [];
+
+  // Lead segment: PAUSED if paused, otherwise running event count (cyan).
+  if (opts.paused) {
+    parts.push(`${A.amber}${A.bold}PAUSED${A.reset}`);
+  } else if (typeof opts.totalEvents === 'number') {
+    parts.push(`${A.cyan}events ${opts.totalEvents.toLocaleString()}${A.reset}`);
+  }
+
+  // Pending: amber when > 0 to draw the eye, dim violet otherwise.
+  const pendColor = opts.pendingCount > 0 ? A.amber : A.violet;
+  parts.push(`${pendColor}${opts.pendingCount} pending${A.reset}`);
+
+  // Sort mode in violet — distinct from the others, ties to the brand.
+  parts.push(`${A.magenta}sort: ${opts.sort}${A.reset}`);
+
+  // Uptime in gold so it stands apart from greys around it.
   if (typeof opts.uptimeSec === 'number') {
-    parts.push(`${A.label}up ${fmtUptime(opts.uptimeSec)}${A.reset}`);
+    parts.push(`${A.gold}up ${fmtUptime(opts.uptimeSec)}${A.reset}`);
   }
   return parts.join(` ${sep} `);
 }
