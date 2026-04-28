@@ -423,8 +423,11 @@ export function formatEventLine(e: EnchantedEvent, maxWidth?: number): string {
   const summary = summarizePayload(e.payload);
   const color = topicColor(e.topic);
 
-  const summaryPart = summary.length > 0 ? `  ${summary}` : '';
-  const line = `${A.label}${ts}${A.reset} ${color}·${A.reset} ${A.body}${topic}${A.reset}${summaryPart}`;
+  const summaryPart = summary.length > 0 ? `  ${A.body}${summary}${A.reset}` : '';
+  // Topic now wears the plugin's truecolor (was muted body grey) — brings the
+  // events column alive and lets the eye pick out hydra/sylph/pech alerts at
+  // a glance. Timestamp stays in label grey so the event content reads first.
+  const line = `${A.label}${ts}${A.reset} ${color}●${A.reset} ${color}${topic}${A.reset}${summaryPart}`;
   if (maxWidth && maxWidth > 20) {
     const stripped = stripAnsi(line);
     if (stripped.length > maxWidth) {
@@ -933,10 +936,14 @@ export interface ModeBannerOpts {
   sort:         SidebarSort;
   scrollBack:   number;
   uptimeSec?:   number;
+  /** When false, the LIVE indicator renders as 4 invisible spaces so the
+   *  layout doesn't reflow. Toggle externally on a ~700ms timer to blink. */
+  blinkOn?:     boolean;
 }
 
 /** Compact mode word used inside the header title, pre-colored:
- *  green LIVE / amber PAUSED / amber FILTER / amber SCROLLED-BACK. */
+ *  green LIVE / amber PAUSED / amber FILTER / amber SCROLLED-BACK.
+ *  LIVE blinks via opts.blinkOn — when false, returns 4 spaces (same width). */
 export function headerMode(opts: ModeBannerOpts): string {
   if (opts.scrollBack > 0) return `${A.amber}${A.bold}SCROLLED-BACK${A.reset}`;
   if (opts.filter)         return `${A.amber}${A.bold}FILTER:${opts.filter}${A.reset}`;
@@ -944,6 +951,7 @@ export function headerMode(opts: ModeBannerOpts): string {
     const tag = opts.pendingCount > 0 ? `PAUSED(+${opts.pendingCount})` : 'PAUSED';
     return `${A.amber}${A.bold}${tag}${A.reset}`;
   }
+  if (opts.blinkOn === false) return '    ';
   return `${A.green}${A.bold}LIVE${A.reset}`;
 }
 
@@ -969,9 +977,14 @@ function fmtUptime(sec: number): string {
 
 /** Mode pill rendered inside the bottom border (§2 footer). */
 export function footerPill(opts: ModeBannerOpts): string {
-  const live = opts.paused
-    ? `${A.amber}${A.bold}PAUSED${A.reset}`
-    : `${A.green}${A.bold}LIVE${A.reset}`;
+  let live: string;
+  if (opts.paused) {
+    live = `${A.amber}${A.bold}PAUSED${A.reset}`;
+  } else if (opts.blinkOn === false) {
+    live = '    ';
+  } else {
+    live = `${A.green}${A.bold}LIVE${A.reset}`;
+  }
   const pending = `${A.label}${opts.pendingCount} pending${A.reset}`;
   const sort = `${A.label}sort: ${opts.sort}${A.reset}`;
   const sep = `${A.label}·${A.reset}`;

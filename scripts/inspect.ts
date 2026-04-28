@@ -148,6 +148,8 @@ interface InspectorState {
   phaseLatencies:  number[];   // last N phase wall-times in ms
   phaseStartMs:    number;     // latest phase enter timestamp
   errCount:        number;
+  // LIVE-indicator blink toggle
+  blinkOn:         boolean;
 }
 
 function makeState(): InspectorState {
@@ -176,6 +178,7 @@ function makeState(): InspectorState {
     phaseLatencies:  [],
     phaseStartMs:    0,
     errCount:        0,
+    blinkOn:         true,
   };
 }
 
@@ -243,6 +246,7 @@ function render(): void {
     filter: state.filter,
     sort: state.sort,
     scrollBack: state.scrollBack,
+    blinkOn: state.blinkOn,
   });
   const titleText = `${brandedTitle()} ${A.label}─${A.reset} ${modeWord}`;
   const hintsText = headerHints();
@@ -325,6 +329,7 @@ function render(): void {
     sort: state.sort,
     scrollBack: state.scrollBack,
     uptimeSec: (Date.now() - state.startMs) / 1000,
+    blinkOn: state.blinkOn,
   })));
 
   // ── Pack into rows-tall frame buffer ─────────────────────────────────────
@@ -460,6 +465,15 @@ function updatePluginMeta(e: EnchantedEvent): void {
     const p = e.payload as Record<string, unknown>;
     if (typeof p['mean'] === 'number') sparkValues.set('emu', p['mean'] as number);
   }
+}
+
+const BLINK_INTERVAL_MS = 700;
+
+function installBlinkTick(): void {
+  setInterval(() => {
+    state.blinkOn = !state.blinkOn;
+    scheduleRender();
+  }, BLINK_INTERVAL_MS);
 }
 
 function installSparklineTick(): void {
@@ -868,6 +882,7 @@ async function main(): Promise<void> {
   installKeyboard();
   installResizeHandler();
   installSparklineTick();
+  installBlinkTick();
 
   // Initial render
   render();
