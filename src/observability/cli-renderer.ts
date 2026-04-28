@@ -170,17 +170,15 @@ const BOX = {
 export function topBorder(width: number, title: string, trailing = '', rounded = true): string {
   const tl = rounded ? BOX.tl : BOX.stl;
   const tr = rounded ? BOX.tr : BOX.str;
-  const titleLabel = title ? `${A.label}${title}${A.reset}` : '';
+  // Title is passed through verbatim — caller controls its colors. Only the
+  // trailing slot is auto-wrapped in label grey (matches the hint convention).
   const trailLabel = trailing ? `${A.label}${trailing}${A.reset}` : '';
-  const titlePart = title ? ` ${titleLabel} ` : '';
+  const titlePart = title ? ` ${title} ` : '';
   const trailPart = trailing ? ` ${trailLabel} ` : '';
-  // Inside-width fillers
-  const inside = width - 2; // exclude corners
+  const inside = width - 2;
   const titleVis = visWidth(titlePart);
   const trailVis = visWidth(trailPart);
-  // We need: ── + titlePart + ─── + trailPart + ─
-  // Layout: [─][titlePart][fill ─][trailPart][─]
-  const minDashes = 1; // at least one dash on each side
+  const minDashes = 1;
   const used = titleVis + trailVis + minDashes * 2;
   const fill = Math.max(1, inside - used);
   const left  = `${A.border}${BOX.h}${A.reset}`;
@@ -936,13 +934,21 @@ export interface ModeBannerOpts {
   scrollBack:   number;
 }
 
-/** Compact mode word used inside the header title:
- *  "live" / "PAUSED" / "FILTER:hydra" / "SCROLLED-BACK". */
+/** Compact mode word used inside the header title, pre-colored:
+ *  green LIVE / amber PAUSED / amber FILTER / amber SCROLLED-BACK. */
 export function headerMode(opts: ModeBannerOpts): string {
-  if (opts.scrollBack > 0) return 'SCROLLED-BACK';
-  if (opts.filter)         return `FILTER:${opts.filter}`;
-  if (opts.paused)         return opts.pendingCount > 0 ? `PAUSED(+${opts.pendingCount})` : 'PAUSED';
-  return 'live';
+  if (opts.scrollBack > 0) return `${A.amber}${A.bold}SCROLLED-BACK${A.reset}`;
+  if (opts.filter)         return `${A.amber}${A.bold}FILTER:${opts.filter}${A.reset}`;
+  if (opts.paused) {
+    const tag = opts.pendingCount > 0 ? `PAUSED(+${opts.pendingCount})` : 'PAUSED';
+    return `${A.amber}${A.bold}${tag}${A.reset}`;
+  }
+  return `${A.green}${A.bold}LIVE${A.reset}`;
+}
+
+/** Pre-colored "Enchanter" wordmark — purple body color, bold. */
+export function brandedTitle(): string {
+  return `${A.violet}${A.bold}Enchanter${A.reset}`;
 }
 
 /** Right-aligned trailing text in the header — keyboard hints. */

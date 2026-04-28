@@ -53,6 +53,7 @@ import {
   frameEmpty,
   headerMode,
   headerHints,
+  brandedTitle,
   footerPill,
   renderHelpLines,
   renderScrollIndicator,
@@ -243,7 +244,7 @@ function render(): void {
     sort: state.sort,
     scrollBack: state.scrollBack,
   });
-  const titleText = `Enchanter ─ ${modeWord}`;
+  const titleText = `${brandedTitle()} ${A.label}─${A.reset} ${modeWord}`;
   const hintsText = headerHints();
   lines.push(topBorder(W, titleText, hintsText));
   lines.push(frameEmpty(W));
