@@ -417,21 +417,58 @@ export function renderPhaseBar(
 // ---------------------------------------------------------------------------
 // Compact event-log line (§2: events panel is right side of split).
 // ---------------------------------------------------------------------------
+/** Severity glyph for an event — info / ok / warn / error.
+ *  Placed in the dedicated SEV column so severity is readable without
+ *  parsing the topic, and survives monochrome rendering. */
+function eventSeverity(topic: string): { glyph: string; color: string } {
+  if (topic.includes('.veto') || topic.includes('.suspicion')
+      || topic.includes('.exhausted') || topic.includes('.exceeded')) {
+    return { glyph: '✖!', color: A.red };
+  }
+  if (topic.includes('.drift') || topic.includes('.warn')) {
+    return { glyph: '⚠ ', color: A.amber };
+  }
+  if (topic.includes('.complete') || topic.includes('.ready')
+      || topic.includes('.scored')) {
+    return { glyph: '● ', color: A.green };
+  }
+  return { glyph: '· ', color: A.label };
+}
+
+/** Column header for the events panel. Schema: TIME · SEV · TOPIC · MSG.
+ *  Each column has a fixed width; truncation drops SEV first then narrows
+ *  TOPIC, but never drops TIME. */
+export function renderEventHeader(width: number): string {
+  const head = ` ${A.label}TIME    SEV TOPIC                MSG${A.reset}`;
+  return padVis(truncVis(head, width), width);
+}
+
+const TIME_W   = 7;   // "SS.mmm "
+const SEV_W    = 3;   // "✖! " / "⚠  " / "·  "
+const TOPIC_W  = 20;  // truncated when narrower
+
 export function formatEventLine(e: EnchantedEvent, maxWidth?: number): string {
   const d = new Date(e.ts);
   const ss = String(d.getSeconds()).padStart(2, '0');
   const ms = String(d.getMilliseconds()).padStart(3, '0');
-  const ts = `${ss}.${ms}`; // tighter than mm:ss.mmm — events panel is narrow
+  const ts = `${ss}.${ms}`;
 
-  const topic = compactTopic(e.topic);
+  const topic   = compactTopic(e.topic);
   const summary = summarizePayload(e.payload);
-  const color = topicColor(e.topic);
+  const sev     = eventSeverity(e.topic);
+  const topicColorCode = topicColor(e.topic);
 
-  const summaryPart = summary.length > 0 ? `  ${A.body}${summary}${A.reset}` : '';
-  // Topic now wears the plugin's truecolor (was muted body grey) — brings the
-  // events column alive and lets the eye pick out hydra/sylph/pech alerts at
-  // a glance. Timestamp stays in label grey so the event content reads first.
-  const line = `${A.label}${ts}${A.reset} ${color}●${A.reset} ${color}${topic}${A.reset}${summaryPart}`;
+  const showSev   = !maxWidth || maxWidth >= 50;
+  const topicW    = !maxWidth || maxWidth >= 80 ? TOPIC_W : 12;
+
+  const tCol = `${A.label}${ts}${A.reset}`;
+  const sCol = showSev
+    ? ` ${sev.color}${sev.glyph}${A.reset}`
+    : '';
+  const pCol = ` ${topicColorCode}${padVis(truncVis(topic, topicW), topicW)}${A.reset}`;
+  const mCol = summary ? `  ${A.body}${summary}${A.reset}` : '';
+  const line = `${tCol}${sCol}${pCol}${mCol}`;
+
   if (maxWidth && maxWidth > 20) {
     const stripped = stripAnsi(line);
     if (stripped.length > maxWidth) {
@@ -901,14 +938,27 @@ function pluginMetric(name: keyof TuiCounters, c: TuiCounters): { text: string; 
   }
 }
 
+/** Column header row for the plugins panel. Returned as a single
+ *  pre-formatted line (caller pads it inside the sub-panel border).
+ *  Must match the column widths used in renderPlugins() below. */
+export function renderPluginHeader(width: number): string {
+  // Two-char marker block (sel + on/off) + 11ch KIND + 1 gap + 14ch VALUE +
+  // 2 gap + 8ch SPARK + 2 gap + 6ch NAME + 2 gap + 8ch STATE
+  const head = ` ${A.label}KIND        VALUE          SPARK   NAME    STATE${A.reset}`;
+  return padVis(truncVis(head, width), width);
+}
+
 /**
  * Render plugin rows for the inner panel. Each row leads with the impact
- * label (cost / security / turns left / …), the metric value, the spark,
- * and the plugin name as a dim trailing tag. Disabled plugins render in
- * the dim/strike style so the toggle state is visible at a glance.
+ * label, the metric value, the spark, plugin name as a dim trailing tag,
+ * and an explicit state tag (running / paused / off / error). State is
+ * communicated through THREE channels — glyph + text-tag + dim/bright —
+ * so the row reads on monochrome.
  *
  *   ●  cost          $0.42        ▁▂▃▄▅▆  pech
- *   ●  security      0 vetoes     ▁▁▁▁▁▂  hydra
+ *   ⏸  cost          $0.42        ▁▂▃▄▅▆  pech    [paused]
+ *   ○  cost          —            ······  pech    [off]
+ *   ✖  cost          ! ledger     ······  pech    [error]
  */
 export function renderPlugins(
   counters: TuiCounters,
@@ -937,6 +987,8 @@ export function renderPlugins(
     - (showSpark ? SPARKLINE_WIDTH + 2 : 0)
     - (showName ? 8 : 0));
 
+  const showState = width >= 58;  // state-tag column drops first on narrow
+
   const lines: string[] = [];
   for (const name of order) {
     const ring = sparks.get(name) ?? new SparkRing();
@@ -944,7 +996,6 @@ export function renderPlugins(
     const isOff = disabled?.has(name) ?? false;
     const isSel = selected === name;
 
-    // Selection prefix: ▸ marker when this row is the keyboard target
     const selMark = isSel ? `${A.amber}▸${A.reset}` : ' ';
     const dot     = isOff
       ? `${A.label}○${A.reset}`
@@ -971,7 +1022,13 @@ export function renderPlugins(
       : `${A.dim}${pluginColor}${name}${A.reset}`;
     const nameCol = showName ? `  ${padVis(nameStr, 6)}` : '';
 
-    const row = `${selMark}${dot} ${impactCol} ${metricCol}${sparkCol}${nameCol}`;
+    // State tag — second channel for the on/off signal so it reads on mono.
+    const stateTag = isOff
+      ? `${A.label}[off]${A.reset}`
+      : `${A.label}      ${A.reset}`;
+    const stateCol = showState ? `  ${padVis(stateTag, 8)}` : '';
+
+    const row = `${selMark}${dot} ${impactCol} ${metricCol}${sparkCol}${nameCol}${stateCol}`;
     lines.push(padVis(truncVis(row, width), width));
   }
   return lines;

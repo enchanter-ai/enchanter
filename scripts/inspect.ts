@@ -57,6 +57,8 @@ import {
   brandedTitle,
   renderContextStrip,
   renderSubPanel,
+  renderPluginHeader,
+  renderEventHeader,
   topicColor,
   footerPill,
   renderHelpLines,
@@ -409,16 +411,22 @@ function render(): void {
     const pluginsW = wide ? split : innerW;
     const eventsW  = wide ? innerW - split - 2 /* gutter */ : innerW;
 
-    const pluginRows = renderPlugins(
-      state.counters,
-      sparks,
-      state.sort,
-      state.meta,
-      pluginsW - 2,
-      state.disabledPlugins,
-      state.selectedPlugin,
-    );
-    const eventRows = buildEventLines(eventsW - 2);
+    const pluginRows = [
+      renderPluginHeader(pluginsW - 2),
+      ...renderPlugins(
+        state.counters,
+        sparks,
+        state.sort,
+        state.meta,
+        pluginsW - 2,
+        state.disabledPlugins,
+        state.selectedPlugin,
+      ),
+    ];
+    const eventRows = [
+      renderEventHeader(eventsW - 2),
+      ...buildEventLines(eventsW - 2),
+    ];
     const alertRows = buildAlertLines(innerW - 2);
 
     const pluginsPanel = renderSubPanel(pluginsW, 'plugins · on/off', pluginRows, PANEL_BODY_ROWS);
