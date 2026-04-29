@@ -1067,26 +1067,65 @@ export function shortenPath(path: string, maxWidth: number): string {
   return '…' + path.slice(path.length - maxWidth + 1);
 }
 
-/** Render the workspace + workflow context strip:
- *    cwd · user dan · ▸demo │ stress │ red-team
+/** Render a sub-panel: small bordered box with a label and rows of content.
+ *  Used to split the inspector's body into named regions (plugins / events /
+ *  alerts) so each one is its own visual unit instead of a shared split.
+ *
+ *    ┌─ plugins ────────────────┐
+ *    │ <row 1 padded to inside> │
+ *    │ <row 2 padded to inside> │
+ *    └──────────────────────────┘
+ *
+ *  Inside content is right-padded to the inner width so the right border
+ *  always lands at the same column. Sharp corners (┌┐└┘) match the
+ *  golden-signal cards' inner-corner convention. */
+export function renderSubPanel(
+  width: number,
+  title: string,
+  rows: ReadonlyArray<string>,
+  minRowsInside: number,
+): string[] {
+  const inside = Math.max(4, width - 2);
+  const titlePart = ` ${A.label}${title}${A.reset} `;
+  const titleVis = title.length + 2;
+  const fillTop  = Math.max(0, inside - titleVis - 1);
+  const top = `${A.border}${BOX.stl}${BOX.h}${A.reset}${titlePart}${A.border}${BOX.h.repeat(fillTop)}${BOX.str}${A.reset}`;
+  const bot = `${A.border}${BOX.sbl}${BOX.h.repeat(inside)}${BOX.sbr}${A.reset}`;
+
+  const body: string[] = [];
+  const rowsToShow = Math.max(minRowsInside, rows.length);
+  for (let i = 0; i < rowsToShow; i++) {
+    const r = rows[i] ?? '';
+    const padded = padVis(truncVis(r, inside), inside);
+    body.push(`${A.border}${BOX.v}${A.reset}${padded}${A.border}${BOX.v}${A.reset}`);
+  }
+  return [top, ...body, bot];
+}
+
+/** Render the watch + account context strip:
+ *    watching <scope> · claude max · org-21f9 · ▸demo │ stress │ red-team
+ *  - "watching" is the MCP server target (what the inspector is observing),
+ *    not the inspector's own cwd. Empty/null → "<no MCP target>".
+ *  - account is the Claude Code subscription tier + first 4 chars of the
+ *    organization UUID (a stable identifier without leaking secrets).
  *  Returns the pre-padded inner content for `frameRow`. */
 export function renderContextStrip(opts: {
-  cwd:       string;
-  user:      string;
+  watching: string | null;
+  account:  string;
   workflows: ReadonlyArray<WorkflowTab>;
   active:    number;
   maxWidth:  number;
 }): string {
-  const { cwd, user, workflows, active, maxWidth } = opts;
-  // Left half: cwd + user
-  const cwdLabel  = `${A.label}cwd${A.reset}`;
-  const cwdValue  = `${A.cyan}${cwd}${A.reset}`;
-  const userLabel = `${A.label}user${A.reset}`;
-  const userValue = `${A.violet}${user}${A.reset}`;
-  const sep       = ` ${A.label}·${A.reset} `;
-  const left      = `${cwdLabel} ${cwdValue}${sep}${userLabel} ${userValue}`;
+  const { watching, account, workflows, active, maxWidth } = opts;
+  const watchLabel = `${A.label}watching${A.reset}`;
+  const watchValue = watching
+    ? `${A.cyan}${watching}${A.reset}`
+    : `${A.label}<no MCP target>${A.reset}`;
+  const acctLabel  = `${A.label}claude${A.reset}`;
+  const acctValue  = `${A.violet}${account}${A.reset}`;
+  const sep        = ` ${A.label}·${A.reset} `;
+  const left       = `${watchLabel} ${watchValue}${sep}${acctLabel} ${acctValue}`;
 
-  // Right half: workflow tabs
   const tabs = workflows.map((wf, i) => {
     const isActive = i === active;
     const marker = isActive ? `${A.amber}▸${A.reset}` : ' ';
@@ -1100,18 +1139,19 @@ export function renderContextStrip(opts: {
     return `${marker}${label}${statusGlyph ? ` ${statusGlyph}` : ''}`;
   }).join(`${A.label} │ ${A.reset}`);
 
-  // Compose: left + variable padding + right, all clipped to maxWidth.
   const leftVis  = visWidth(left);
   const rightVis = visWidth(tabs);
   const gap      = Math.max(2, maxWidth - leftVis - rightVis);
   const composed = left + ' '.repeat(gap) + tabs;
   if (visWidth(composed) <= maxWidth) return composed;
-  // Too wide — shorten the cwd, retry once.
-  const cwdRoom  = Math.max(8, maxWidth - rightVis - leftVis + cwd.length - 4);
-  const shortCwd = shortenPath(cwd, cwdRoom);
-  const left2    = `${cwdLabel} ${A.cyan}${shortCwd}${A.reset}${sep}${userLabel} ${userValue}`;
-  const composed2 = left2 + '  ' + tabs;
-  return truncVis(composed2, maxWidth);
+  // Too wide — shorten the watching path, retry once.
+  if (watching) {
+    const shortRoom = Math.max(8, maxWidth - rightVis - leftVis + watching.length - 4);
+    const shortWatch = shortenPath(watching, shortRoom);
+    const left2 = `${watchLabel} ${A.cyan}${shortWatch}${A.reset}${sep}${acctLabel} ${acctValue}`;
+    return truncVis(left2 + '  ' + tabs, maxWidth);
+  }
+  return truncVis(composed, maxWidth);
 }
 
 /** Right-aligned trailing text in the header — keyboard hints. */

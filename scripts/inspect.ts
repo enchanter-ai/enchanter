@@ -19,7 +19,7 @@
 */
 
 import { spawn, type ChildProcessByStdio, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -56,7 +56,8 @@ import {
   headerHints,
   brandedTitle,
   renderContextStrip,
-  tildify,
+  renderSubPanel,
+  topicColor,
   footerPill,
   renderHelpLines,
   renderScrollIndicator,
@@ -156,11 +157,14 @@ interface InspectorState {
   // Plugin enable/disable + keyboard selection (for the on/off toggle)
   disabledPlugins: Set<keyof TuiCounters>;
   selectedPlugin:  keyof TuiCounters | null;
-  // Workflow context — cwd + identity + active workflow tab
-  workspaceRoot:   string;
-  userIdentity:    string;
+  // What the inspector is watching (MCP server target, not the inspector's
+  // own cwd) + the Claude Code account we're connected to.
+  watchedScope:    string | null;
+  claudeAccount:   string;
   workflows:       Workflow[];
   activeWorkflow:  number;  // index into workflows[]
+  // High-priority events that the developer should NOT miss.
+  alertBuffer:     EnchantedEvent[];
 }
 
 interface Workflow {
@@ -200,8 +204,8 @@ function makeState(): InspectorState {
     blinkPhase:      0,
     disabledPlugins: new Set(),
     selectedPlugin:  null,
-    workspaceRoot:   process.cwd(),
-    userIdentity:    detectUserIdentity(),
+    watchedScope:    null,
+    claudeAccount:   detectClaudeAccount(),
     workflows:       [{
       id:        'demo',
       label:     'demo',
@@ -210,16 +214,32 @@ function makeState(): InspectorState {
       status:    'idle',
     }],
     activeWorkflow:  0,
+    alertBuffer:     [],
   };
 }
 
-/** Best-effort identification of who's running this inspector.
- *  Source order: $CLAUDE_CODE_USER → $USER / $USERNAME → "anonymous". */
-function detectUserIdentity(): string {
-  const fromClaude = process.env['CLAUDE_CODE_USER'] ?? process.env['CLAUDE_USER'];
-  if (fromClaude && fromClaude.trim()) return fromClaude.trim();
-  const fromShell = process.env['USER'] ?? process.env['USERNAME'] ?? process.env['LOGNAME'];
-  if (fromShell && fromShell.trim()) return fromShell.trim();
+/** Read Claude Code's local credentials to surface the connected account.
+ *  Returns "<tier> · org-<4-char-prefix>" without leaking the OAuth token.
+ *  Falls back to "claude (anonymous)" if the file is missing or unreadable. */
+function detectClaudeAccount(): string {
+  try {
+    const path = join(homedir(), '.claude', '.credentials.json');
+    const raw  = readFileSync(path, 'utf8');
+    const json = JSON.parse(raw) as Record<string, unknown>;
+    const oauth = (json['claudeAiOauth'] ?? {}) as Record<string, unknown>;
+    const tier  = typeof oauth['subscriptionType'] === 'string'
+      ? (oauth['subscriptionType'] as string)
+      : null;
+    const org   = typeof json['organizationUuid'] === 'string'
+      ? (json['organizationUuid'] as string)
+      : null;
+    const orgTag = org ? `org-${org.slice(0, 4)}` : '';
+    if (tier && orgTag) return `${tier} · ${orgTag}`;
+    if (tier)           return tier;
+    if (orgTag)         return orgTag;
+  } catch {
+    // fall through
+  }
   return 'anonymous';
 }
 
@@ -303,13 +323,12 @@ function render(): void {
                   : '';
   lines.push(topBorder(W, titleText, hintsText));
 
-  // ── Workspace context strip (cwd + user + workflow tabs) ────────────────
+  // ── Watching + Claude account context strip + workflow tabs ─────────────
   // Skipped on ultra-narrow terminals where every row is precious.
   if (tier !== 'ultra') {
-    const tildeCwd = tildify(state.workspaceRoot, homedir());
     const ctx = renderContextStrip({
-      cwd:       tildeCwd,
-      user:      state.userIdentity,
+      watching:  state.watchedScope,
+      account:   state.claudeAccount,
       workflows: state.workflows.map((wf) => ({
         id:     wf.id,
         label:  wf.label,
@@ -331,14 +350,11 @@ function render(): void {
   }
   lines.push(frameEmpty(W));
 
-  // ── Plugins | Events split ───────────────────────────────────────────────
-  // Inner panels: account for outer frame chrome + a 1-char gutter each side.
-  // Total inside width = W - 2.  Reserve 2 for left+right gutter spaces.
-  const innerW = W - 4;
-  const splitGap = 1;
-  const pluginsW = wide ? Math.floor(innerW * 0.55) : innerW;
-  const eventsW = wide ? innerW - pluginsW - splitGap : innerW;
-
+  // ── Three sub-panels: plugins · recent events · alerts ──────────────────
+  // Each panel has its own bordered box. On wide terminals the plugins and
+  // events panels sit side-by-side; alerts spans full width below them.
+  // On narrow/ultra terminals everything stacks vertically, events drops
+  // first (alerts are higher priority).
   if (state.inputMode === 'help') {
     const help = renderHelpLines();
     const bodyRows = Math.min(help.length, 14);
@@ -346,9 +362,12 @@ function render(): void {
       lines.push(frameRow(W, `  ${help[i] ?? ''}`));
     }
   } else {
-    // Plugins panel header (rounded inner top)
-    // We render the panels as sub-frames inside the outer.  For minimal noise,
-    // we use a simple top label line then bare rows (§2: bare rows).
+    const innerW = W - 4;
+    const PANEL_BODY_ROWS = 9;
+    const split = wide ? Math.floor(innerW * 0.55) : innerW;
+    const pluginsW = wide ? split : innerW;
+    const eventsW  = wide ? innerW - split - 2 /* gutter */ : innerW;
+
     const pluginRows = renderPlugins(
       state.counters,
       sparks,
@@ -359,29 +378,29 @@ function render(): void {
       state.selectedPlugin,
     );
     const eventRows = buildEventLines(eventsW - 2);
+    const alertRows = buildAlertLines(innerW - 2);
 
-    // Inner panel headers (one row each, label-grey)
-    const pluginsHeader = `${A.label}plugins${A.reset}`;
-    const eventsHeader  = `${A.label}recent events${A.reset}`;
-    if (wide) {
-      lines.push(frameRow(W, ` ${padVis(pluginsHeader, pluginsW)} ${padVis(eventsHeader, eventsW)}`));
-    } else {
-      lines.push(frameRow(W, ` ${pluginsHeader}`));
-    }
+    const pluginsPanel = renderSubPanel(pluginsW, 'plugins · on/off', pluginRows, PANEL_BODY_ROWS);
+    const eventsPanel  = wide
+      ? renderSubPanel(eventsW, 'recent events', eventRows, PANEL_BODY_ROWS)
+      : null;
 
-    const bodyRows = Math.max(pluginRows.length, eventRows.length, MAX_VISIBLE_EVENTS);
-    const rowsToShow = Math.min(bodyRows, 11);
-    for (let i = 0; i < rowsToShow; i++) {
-      const left  = pluginRows[i] ?? '';
-      const right = eventRows[i] ?? '';
-      const leftPadded = padVis(truncVis(left, pluginsW), pluginsW);
-      if (wide) {
-        const rightPadded = padVis(truncVis(right, eventsW), eventsW);
-        lines.push(frameRow(W, ` ${leftPadded} ${rightPadded}`));
-      } else {
-        lines.push(frameRow(W, ` ${leftPadded}`));
+    if (wide && eventsPanel) {
+      // Side-by-side: zip lines from both panels with a 2-space gutter.
+      const rows = Math.max(pluginsPanel.length, eventsPanel.length);
+      for (let i = 0; i < rows; i++) {
+        const l = pluginsPanel[i] ?? padVis('', pluginsW);
+        const r = eventsPanel[i] ?? padVis('', eventsW);
+        lines.push(frameRow(W, ` ${padVis(l, pluginsW)}  ${padVis(r, eventsW)}`));
       }
+    } else {
+      for (const row of pluginsPanel) lines.push(frameRow(W, ` ${row}`));
     }
+
+    // Alerts panel — full inside width, rendered below the side-by-side
+    // panels (or below the plugins panel on narrow terminals).
+    const alertsPanel = renderSubPanel(innerW, 'alerts · don\'t miss', alertRows, 4);
+    for (const row of alertsPanel) lines.push(frameRow(W, ` ${row}`));
   }
 
   lines.push(frameEmpty(W));
@@ -425,6 +444,38 @@ function buildVisibleEvents(): EnchantedEvent[] {
   if (end < 0) end = 0;
   const start  = Math.max(0, end - MAX_VISIBLE_EVENTS);
   return source.slice(start, end);
+}
+
+function buildAlertLines(maxWidth: number): string[] {
+  if (state.alertBuffer.length === 0) {
+    return [`${A.label}(none yet — vetoes, drift, suspicions, budget breaks land here)${A.reset}`];
+  }
+  const lines: string[] = [];
+  // Newest first — alerts are read top-down.
+  const ordered = [...state.alertBuffer].reverse();
+  for (const e of ordered) {
+    const d = new Date(e.ts);
+    const ts = `${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+    const c = topicColor(e.topic);
+    const summary = summarizeAlertPayload(e.payload);
+    const tag = `${A.red}${A.bold}!${A.reset}`;
+    const line = `${A.label}${ts}${A.reset} ${tag} ${c}${e.topic}${A.reset}  ${A.body}${summary}${A.reset}`;
+    lines.push(line);
+  }
+  return lines;
+}
+
+function summarizeAlertPayload(payload: Readonly<Record<string, unknown>>): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const p = payload;
+  if (typeof p['pattern_id'] === 'string') return `pattern ${p['pattern_id'] as string}`;
+  if (typeof p['reason']     === 'string') return p['reason']     as string;
+  if (typeof p['tool']       === 'string') {
+    const args = Array.isArray(p['args']) ? (p['args'] as unknown[]).join(' ') : '';
+    return `${p['tool'] as string} ${args}`.trim();
+  }
+  if (typeof p['secret_type'] === 'string') return `secret type ${p['secret_type'] as string}`;
+  return '';
 }
 
 function buildEventLines(maxWidth: number): string[] {
@@ -498,7 +549,30 @@ function handleEvent(e: EnchantedEvent): void {
   if (!owner || !state.disabledPlugins.has(owner)) {
     trackAll(state.counters, e);
   }
+  // Pin high-priority events to the alert buffer so they don't scroll past.
+  if (isAlertTopic(e.topic)) {
+    state.alertBuffer.push(e);
+    if (state.alertBuffer.length > ALERT_BUFFER_SIZE) state.alertBuffer.shift();
+  }
   scheduleRender();
+}
+
+// Topics the developer can't afford to miss. Vetoes (security/git) +
+// suspicions + drift detections + budget/runway exhaustion.
+const ALERT_TOPIC_PREFIXES: ReadonlyArray<string> = [
+  'hydra.veto',
+  'sylph.destructive',
+  'lich.suspicion',
+  'naga.schema.drift',
+  'djinn.drift',
+  'emu.runway.exhausted',
+  'pech.budget.exceeded',
+];
+const ALERT_BUFFER_SIZE = 20;
+
+function isAlertTopic(topic: string): boolean {
+  for (const p of ALERT_TOPIC_PREFIXES) if (topic.startsWith(p)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +655,9 @@ function installSparklineTick(): void {
 function spawnSession(): McpSession {
   const sandbox    = join(tmpdir(), `enchanter-inspect-${Date.now()}`);
   mkdirSync(sandbox, { recursive: true });
+  // The MCP filesystem server is rooted at this sandbox — that's what the
+  // inspector is "watching" from the developer's perspective.
+  state.watchedScope = sandbox;
   const samplePath = join(sandbox, 'config.txt');
   writeFileSync(
     samplePath,
