@@ -160,7 +160,7 @@ interface InspectorState {
   // What the inspector is watching (MCP server target, not the inspector's
   // own cwd) + the Claude Code account we're connected to.
   watchedScope:    string | null;
-  claudeAccount:   string;
+  claudeAccount:   ClaudeAccount;
   workflows:       Workflow[];
   activeWorkflow:  number;  // index into workflows[]
   // High-priority events that the developer should NOT miss.
@@ -221,48 +221,65 @@ function makeState(): InspectorState {
   };
 }
 
+interface ClaudeAccount {
+  email:  string;
+  plan:   string;   // subscription tier — "max" / "pro" / "free" / "team"
+  model:  string;   // currently active model — best-effort
+}
+
 /** Read Claude Code's local config to surface the connected account.
  *
- *  Source order:
- *    1. ~/.claude.json → oauthAccount.{emailAddress, displayName}
- *       (canonical Claude Code config; carries the email + display name)
- *    2. ~/.claude/.credentials.json → claudeAiOauth.subscriptionType
- *       (fallback when ~/.claude.json is missing — no email there)
+ *  Sources:
+ *    1. ~/.claude.json → oauthAccount.emailAddress (the email)
+ *    2. ~/.claude/.credentials.json → claudeAiOauth.subscriptionType (the plan)
+ *    3. process.env CLAUDE_MODEL / ANTHROPIC_MODEL / CLAUDE_CODE_MODEL → model
+ *       (no canonical local file carries the active model, so we read whatever
+ *        the parent shell exported; "auto" when none is set)
  *
- *  Returns the email when available (the user IS the account owner — this
- *  is their own info displayed back to them, no secret being leaked).
- *  Falls back to display name → subscription tier → "anonymous". */
-function detectClaudeAccount(): string {
+ *  Returns each field independently so the header can render
+ *  "watching <path> · <plan> / <model> · <email>". The user IS the
+ *  account owner — surfacing their own email back to them isn't a leak.
+ *  Each field falls back to a defensible string ("anonymous", "—", "auto")
+ *  when the source can't be read. */
+function detectClaudeAccount(): ClaudeAccount {
+  let email = '';
   try {
-    const path = join(homedir(), '.claude.json');
-    const raw  = readFileSync(path, 'utf8');
+    const raw  = readFileSync(join(homedir(), '.claude.json'), 'utf8');
     const json = JSON.parse(raw) as Record<string, unknown>;
     const acct = (json['oauthAccount'] ?? {}) as Record<string, unknown>;
-    const email = typeof acct['emailAddress'] === 'string'
-      ? (acct['emailAddress'] as string).trim()
-      : '';
-    if (email) return email;
-    const name = typeof acct['displayName'] === 'string'
-      ? (acct['displayName'] as string).trim()
-      : '';
-    if (name) return name;
-  } catch {
-    // fall through
-  }
-  // Fallback: subscription tier from the credentials file.
+    if (typeof acct['emailAddress'] === 'string') email = (acct['emailAddress'] as string).trim();
+    else if (typeof acct['displayName'] === 'string') email = (acct['displayName'] as string).trim();
+  } catch { /* ignore */ }
+
+  let plan = '';
   try {
-    const path = join(homedir(), '.claude', '.credentials.json');
-    const raw  = readFileSync(path, 'utf8');
+    const raw  = readFileSync(join(homedir(), '.claude', '.credentials.json'), 'utf8');
     const json = JSON.parse(raw) as Record<string, unknown>;
     const oauth = (json['claudeAiOauth'] ?? {}) as Record<string, unknown>;
-    const tier  = typeof oauth['subscriptionType'] === 'string'
-      ? (oauth['subscriptionType'] as string)
-      : null;
-    if (tier) return tier;
-  } catch {
-    // fall through
-  }
-  return 'anonymous';
+    if (typeof oauth['subscriptionType'] === 'string') plan = (oauth['subscriptionType'] as string).trim();
+  } catch { /* ignore */ }
+
+  // The active model isn't stored in any local file Claude Code persists, so
+  // we read it from environment variables the parent shell may have exported.
+  // Fall back to "auto" when nothing is set.
+  const envModel = process.env['CLAUDE_CODE_MODEL']
+                ?? process.env['CLAUDE_MODEL']
+                ?? process.env['ANTHROPIC_MODEL']
+                ?? '';
+  const model = envModel.trim() ? prettifyModelId(envModel.trim()) : 'auto';
+
+  return {
+    email: email || 'anonymous',
+    plan:  plan  || '—',
+    model,
+  };
+}
+
+/** Trim long model IDs ("claude-opus-4-7" → "opus 4.7") for header display. */
+function prettifyModelId(id: string): string {
+  const m = /^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/.exec(id);
+  if (m) return `${m[1]} ${m[2]}.${m[3]}`;
+  return id;
 }
 
 let state = makeState();
@@ -350,7 +367,9 @@ function render(): void {
   if (tier !== 'ultra') {
     const ctx = renderContextStrip({
       watching:  state.watchedScope,
-      account:   state.claudeAccount,
+      plan:      state.claudeAccount.plan,
+      model:     state.claudeAccount.model,
+      email:     state.claudeAccount.email,
       workflows: state.workflows.map((wf) => ({
         id:     wf.id,
         label:  wf.label,

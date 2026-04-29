@@ -1103,28 +1103,33 @@ export function renderSubPanel(
 }
 
 /** Render the watch + account context strip:
- *    watching <scope> · claude max · org-21f9 · ▸demo │ stress │ red-team
+ *    watching <scope> · <plan> / <model> · <email>  …  ▸demo │ stress │ …
  *  - "watching" is the MCP server target (what the inspector is observing),
  *    not the inspector's own cwd. Empty/null → "<no MCP target>".
- *  - account is the Claude Code subscription tier + first 4 chars of the
- *    organization UUID (a stable identifier without leaking secrets).
+ *  - plan is the Claude Code subscription tier (max / pro / free / team)
+ *  - model is the currently-active model (best-effort from env vars)
+ *  - email is the connected Claude account
  *  Returns the pre-padded inner content for `frameRow`. */
 export function renderContextStrip(opts: {
   watching: string | null;
-  account:  string;
+  plan:     string;
+  model:    string;
+  email:    string;
   workflows: ReadonlyArray<WorkflowTab>;
   active:    number;
   maxWidth:  number;
 }): string {
-  const { watching, account, workflows, active, maxWidth } = opts;
+  const { watching, plan, model, email, workflows, active, maxWidth } = opts;
   const watchLabel = `${A.label}watching${A.reset}`;
   const watchValue = watching
     ? `${A.cyan}${watching}${A.reset}`
     : `${A.label}<no MCP target>${A.reset}`;
-  const acctLabel  = `${A.label}claude${A.reset}`;
-  const acctValue  = `${A.violet}${account}${A.reset}`;
+  // <plan> / <model> as a single colored unit so the relationship reads
+  // visually: plan is the entitlement, model is what's running on it.
+  const planModel  = `${A.amber}${plan}${A.reset}${A.label}/${A.reset}${A.gold}${model}${A.reset}`;
+  const emailValue = `${A.violet}${email}${A.reset}`;
   const sep        = ` ${A.label}·${A.reset} `;
-  const left       = `${watchLabel} ${watchValue}${sep}${acctLabel} ${acctValue}`;
+  const left       = `${watchLabel} ${watchValue}${sep}${planModel}${sep}${emailValue}`;
 
   const tabs = workflows.map((wf, i) => {
     const isActive = i === active;
@@ -1148,7 +1153,7 @@ export function renderContextStrip(opts: {
   if (watching) {
     const shortRoom = Math.max(8, maxWidth - rightVis - leftVis + watching.length - 4);
     const shortWatch = shortenPath(watching, shortRoom);
-    const left2 = `${watchLabel} ${A.cyan}${shortWatch}${A.reset}${sep}${acctLabel} ${acctValue}`;
+    const left2 = `${watchLabel} ${A.cyan}${shortWatch}${A.reset}${sep}${planModel}${sep}${emailValue}`;
     return truncVis(left2 + '  ' + tabs, maxWidth);
   }
   return truncVis(composed, maxWidth);
