@@ -221,10 +221,35 @@ function makeState(): InspectorState {
   };
 }
 
-/** Read Claude Code's local credentials to surface the connected account.
- *  Returns "<tier> · org-<4-char-prefix>" without leaking the OAuth token.
- *  Falls back to "claude (anonymous)" if the file is missing or unreadable. */
+/** Read Claude Code's local config to surface the connected account.
+ *
+ *  Source order:
+ *    1. ~/.claude.json → oauthAccount.{emailAddress, displayName}
+ *       (canonical Claude Code config; carries the email + display name)
+ *    2. ~/.claude/.credentials.json → claudeAiOauth.subscriptionType
+ *       (fallback when ~/.claude.json is missing — no email there)
+ *
+ *  Returns the email when available (the user IS the account owner — this
+ *  is their own info displayed back to them, no secret being leaked).
+ *  Falls back to display name → subscription tier → "anonymous". */
 function detectClaudeAccount(): string {
+  try {
+    const path = join(homedir(), '.claude.json');
+    const raw  = readFileSync(path, 'utf8');
+    const json = JSON.parse(raw) as Record<string, unknown>;
+    const acct = (json['oauthAccount'] ?? {}) as Record<string, unknown>;
+    const email = typeof acct['emailAddress'] === 'string'
+      ? (acct['emailAddress'] as string).trim()
+      : '';
+    if (email) return email;
+    const name = typeof acct['displayName'] === 'string'
+      ? (acct['displayName'] as string).trim()
+      : '';
+    if (name) return name;
+  } catch {
+    // fall through
+  }
+  // Fallback: subscription tier from the credentials file.
   try {
     const path = join(homedir(), '.claude', '.credentials.json');
     const raw  = readFileSync(path, 'utf8');
@@ -233,13 +258,7 @@ function detectClaudeAccount(): string {
     const tier  = typeof oauth['subscriptionType'] === 'string'
       ? (oauth['subscriptionType'] as string)
       : null;
-    const org   = typeof json['organizationUuid'] === 'string'
-      ? (json['organizationUuid'] as string)
-      : null;
-    const orgTag = org ? `org-${org.slice(0, 4)}` : '';
-    if (tier && orgTag) return `${tier} · ${orgTag}`;
-    if (tier)           return tier;
-    if (orgTag)         return orgTag;
+    if (tier) return tier;
   } catch {
     // fall through
   }
@@ -658,9 +677,9 @@ function installSparklineTick(): void {
 function spawnSession(): McpSession {
   const sandbox    = join(tmpdir(), `enchanter-inspect-${Date.now()}`);
   mkdirSync(sandbox, { recursive: true });
-  // The MCP filesystem server is rooted at this sandbox — that's what the
-  // inspector is "watching" from the developer's perspective.
-  state.watchedScope = sandbox;
+  // The "watching" header keeps showing the user's launch cwd — the demo
+  // sandbox is an internal implementation detail and shouldn't replace
+  // the user's project context. The sandbox path is logged only.
   const samplePath = join(sandbox, 'config.txt');
   writeFileSync(
     samplePath,
