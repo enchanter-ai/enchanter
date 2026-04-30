@@ -166,13 +166,28 @@ interface InspectorState {
   workflows:       Workflow[];
   activeWorkflow:  number;  // index into workflows[]
   // High-priority events that the developer should NOT miss.
-  alertBuffer:     EnchantedEvent[];
+  alertBuffer:     AlertEntry[];
+  selectedAlert:   number;  // index in alertBuffer for keyboard ack
   // Which sub-panel currently owns the keyboard. Tab cycles.
   focusedPane:     PaneId;
 }
 
 type PaneId = 'plugins' | 'events' | 'alerts';
 const PANE_ORDER: PaneId[] = ['plugins', 'events', 'alerts'];
+
+/** One alert row in the alerts panel. Multiple firings of the same
+ *  (topic, pattern_id) collapse into a single entry with `count > 1`.
+ *  Pattern from PagerDuty incidents + Sentry issue triage. */
+interface AlertEntry {
+  key:        string;            // dedup key: topic + pattern_id (or topic + tool)
+  topic:      string;
+  payload:    Record<string, unknown>;
+  firstTs:    number;
+  lastTs:     number;
+  count:      number;
+  acked:      boolean;
+  ackedAtMs:  number;            // 0 if not acked; auto-expire 60s after this
+}
 
 interface Workflow {
   id:       string;
@@ -225,6 +240,7 @@ function makeState(): InspectorState {
     }],
     activeWorkflow:  0,
     alertBuffer:     [],
+    selectedAlert:   0,
     focusedPane:     'plugins',
   };
 }
@@ -510,23 +526,63 @@ function buildVisibleEvents(): EnchantedEvent[] {
   return source.slice(start, end);
 }
 
+function buildAlertHeader(width: number): string {
+  const head = ` ${A.label}TIME    SEV PLUGIN     PATTERN              MSG                ACK${A.reset}`;
+  return padVis(truncVis(head, width), width);
+}
+
 function buildAlertLines(maxWidth: number): string[] {
   if (state.alertBuffer.length === 0) {
-    return [`${A.label}(none yet — vetoes, drift, suspicions, budget breaks land here)${A.reset}`];
+    return [
+      buildAlertHeader(maxWidth),
+      `${A.label}(none yet — vetoes, drift, suspicions, budget breaks land here)${A.reset}`,
+    ];
   }
-  const lines: string[] = [];
-  // Newest first — alerts are read top-down.
-  const ordered = [...state.alertBuffer].reverse();
-  for (const e of ordered) {
-    const d = new Date(e.ts);
+  // Sort: unacked first by recency desc, then acked by recency desc.
+  const ordered = [...state.alertBuffer].sort((a, b) => {
+    if (a.acked !== b.acked) return a.acked ? 1 : -1;
+    return b.lastTs - a.lastTs;
+  });
+
+  const lines: string[] = [buildAlertHeader(maxWidth)];
+  for (let i = 0; i < ordered.length; i++) {
+    const a = ordered[i];
+    if (!a) continue;
+    const isSel = i === state.selectedAlert && state.focusedPane === 'alerts';
+    const d = new Date(a.lastTs);
     const ts = `${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
-    const c = topicColor(e.topic);
-    const summary = summarizeAlertPayload(e.payload);
-    const tag = `${A.red}${A.bold}!${A.reset}`;
-    const line = `${A.label}${ts}${A.reset} ${tag} ${c}${e.topic}${A.reset}  ${A.body}${summary}${A.reset}`;
+    const sev = eventSeverityForAlert(a);
+    const plugin = a.topic.split('.')[0] ?? '';
+    const pattern = typeof a.payload['pattern_id'] === 'string'
+      ? a.payload['pattern_id'] as string
+      : (typeof a.payload['tool'] === 'string' ? a.payload['tool'] as string : '—');
+    const countTag = a.count > 1 ? ` (×${a.count})` : '';
+    const ack = a.acked ? `${A.label}✓ ack${A.reset}` : '';
+    const msg = summarizeAlertPayload(a.payload);
+    const sel = isSel ? `${A.amber}▸${A.reset}` : ' ';
+    const dim = a.acked ? A.label : A.body;
+    const tColor = a.acked ? A.label : A.label;
+    const sevColor = a.acked ? A.label : sev.color;
+    const line =
+      `${sel}${tColor}${ts}${A.reset} ${sevColor}${sev.glyph}${A.reset} ` +
+      `${dim}${padVis(truncVis(plugin, 9), 9)}${A.reset}  ` +
+      `${dim}${padVis(truncVis(pattern + countTag, 19), 19)}${A.reset}  ` +
+      `${dim}${truncVis(msg, Math.max(8, maxWidth - 56))}${A.reset}  ${ack}`;
     lines.push(line);
   }
   return lines;
+}
+
+/** Severity glyph for an alert — vetoes/exhausted are critical, drift warns. */
+function eventSeverityForAlert(a: AlertEntry): { glyph: string; color: string } {
+  if (a.topic.includes('.veto') || a.topic.includes('.suspicion')
+      || a.topic.includes('.exhausted') || a.topic.includes('.exceeded')) {
+    return { glyph: '✖!', color: '\x1b[38;2;248;81;73m' };
+  }
+  if (a.topic.includes('.drift')) {
+    return { glyph: '⚠ ', color: '\x1b[38;2;210;153;34m' };
+  }
+  return { glyph: '· ', color: '\x1b[38;2;120;128;135m' };
 }
 
 function summarizeAlertPayload(payload: Readonly<Record<string, unknown>>): string {
@@ -613,12 +669,66 @@ function handleEvent(e: EnchantedEvent): void {
   if (!owner || !state.disabledPlugins.has(owner)) {
     trackAll(state.counters, e);
   }
-  // Pin high-priority events to the alert buffer so they don't scroll past.
+  // Pin high-priority events to the alert buffer (deduped by topic+key).
   if (isAlertTopic(e.topic)) {
-    state.alertBuffer.push(e);
-    if (state.alertBuffer.length > ALERT_BUFFER_SIZE) state.alertBuffer.shift();
+    promoteAlert(e);
   }
   scheduleRender();
+}
+
+/** Promote an event into the alerts panel. If a matching key is already
+ *  present, increment count + bump lastTs instead of adding a row.
+ *  Dedup key: topic + pattern_id (else topic + tool, else topic only). */
+function promoteAlert(e: EnchantedEvent): void {
+  const p = e.payload as Record<string, unknown>;
+  const ident = typeof p['pattern_id'] === 'string' ? (p['pattern_id'] as string)
+              : typeof p['tool']       === 'string' ? (p['tool']       as string)
+              : '';
+  const key = `${e.topic}::${ident}`;
+  const existing = state.alertBuffer.find((a) => a.key === key);
+  if (existing) {
+    existing.count += 1;
+    existing.lastTs = e.ts;
+    // A new firing un-acks an alert (it's still happening).
+    existing.acked = false;
+    existing.ackedAtMs = 0;
+    return;
+  }
+  state.alertBuffer.push({
+    key,
+    topic:     e.topic,
+    payload:   p,
+    firstTs:   e.ts,
+    lastTs:    e.ts,
+    count:     1,
+    acked:     false,
+    ackedAtMs: 0,
+  });
+  if (state.alertBuffer.length > ALERT_BUFFER_SIZE) state.alertBuffer.shift();
+}
+
+/** Drop acked alerts that have been quiet for > 60s. Called on the
+ *  blink tick so it runs at a steady cadence without its own timer. */
+const ALERT_ACK_EXPIRE_MS = 60_000;
+
+/** Sort alerts: unacked first by recency desc, then acked by recency desc.
+ *  Used to map the visual selectedAlert index back to a buffer entry. */
+function sortedAlerts(): AlertEntry[] {
+  return [...state.alertBuffer].sort((a, b) => {
+    if (a.acked !== b.acked) return a.acked ? 1 : -1;
+    return b.lastTs - a.lastTs;
+  });
+}
+
+function expireAckedAlerts(): void {
+  const now = Date.now();
+  const before = state.alertBuffer.length;
+  state.alertBuffer = state.alertBuffer.filter((a) =>
+    !a.acked || (now - a.ackedAtMs) < ALERT_ACK_EXPIRE_MS,
+  );
+  if (state.alertBuffer.length !== before) {
+    state.selectedAlert = Math.min(state.selectedAlert, Math.max(0, state.alertBuffer.length - 1));
+  }
 }
 
 // Topics the developer can't afford to miss. Vetoes (security/git) +
@@ -687,6 +797,7 @@ const BLINK_INTERVAL_MS = 250;
 function installBlinkTick(): void {
   setInterval(() => {
     state.blinkPhase = (state.blinkPhase + 1) % 8;
+    expireAckedAlerts();   // cheap O(N≤20) sweep, every 250ms
     scheduleRender();
   }, BLINK_INTERVAL_MS);
 }
@@ -1058,6 +1169,37 @@ function installKeyboard(): void {
       state.focusedPane = PANE_ORDER[(i + 1) % PANE_ORDER.length] ?? 'plugins';
       scheduleRender();
       return;
+    }
+
+    // ─── Pane-scoped keys: ALERTS pane ────────────────────────────────
+    if (state.focusedPane === 'alerts') {
+      if (key === 'a') {
+        // Ack the selected alert — it dims and starts a 60s expire timer.
+        const sorted = sortedAlerts();
+        const target = sorted[state.selectedAlert];
+        if (target && !target.acked) {
+          target.acked = true;
+          target.ackedAtMs = Date.now();
+          scheduleRender();
+        }
+        return;
+      }
+      if (key === 'A') {
+        // Ack-all.
+        const now = Date.now();
+        for (const a of state.alertBuffer) {
+          if (!a.acked) { a.acked = true; a.ackedAtMs = now; }
+        }
+        scheduleRender();
+        return;
+      }
+      if (key === 'c') {
+        // Clear all acked alerts immediately (don't wait for 60s expire).
+        state.alertBuffer = state.alertBuffer.filter((a) => !a.acked);
+        state.selectedAlert = 0;
+        scheduleRender();
+        return;
+      }
     }
 
     // ─── Pane-scoped keys: PLUGINS pane ───────────────────────────────
