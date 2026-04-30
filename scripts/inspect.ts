@@ -36,6 +36,7 @@ import { djinnAdapter }                        from '../src/plugins/djinn.adapte
 import { emuAdapter }                          from '../src/plugins/emu.adapter.js';
 import { gorgonAdapter }                       from '../src/plugins/gorgon.adapter.js';
 import { subscribeNotifier }                   from '../src/observability/notifier.js';
+import { DashboardServer }                     from '../src/observability/dashboard-server.js';
 
 import type { EnchantedEvent } from '../src/bus/event-types.js';
 import type { LifecyclePhase } from '../src/orchestration/request-context.js';
@@ -97,6 +98,12 @@ interface McpSession {
   samplePath: string;
 }
 let session: McpSession | null = null;
+// Broadcaster: lets producer subprocesses (mcp-wrap, watch, run, init-hooks)
+// fan their events INTO the inspector's bus, so events flow through the same
+// plugin pipeline whether they originated locally (demo) or from another
+// process. Started/stopped per session.
+let dashServer: DashboardServer | null = null;
+const BROADCASTER_PORT = parseInt(process.env['ENCHANTER_BUS_PORT'] ?? '3001', 10);
 
 // ---------------------------------------------------------------------------
 // Lifecycle phase order
@@ -870,10 +877,25 @@ function spawnSession(): McpSession {
   subscribeNotifier(client.bus, { sound: false, throttleMs: 500 });
   client.bus.subscribe('*', handleEvent);
 
+  // Start the broadcaster so producer subprocesses can fan in. If the port
+  // is in use (another inspector already running), DashboardServer.start()
+  // logs nothing and we continue with a local-only bus.
+  if (!dashServer) {
+    dashServer = new DashboardServer({
+      port: BROADCASTER_PORT,
+      getLedger: () => [],
+      plugins: ['hydra', 'sylph', 'pech', 'naga', 'lich', 'crow', 'djinn', 'emu', 'gorgon'],
+    });
+    try { dashServer.start(client.bus); }
+    catch { dashServer = null; }
+  }
+
   return { client, proc, sandbox, samplePath };
 }
 
 function teardownSession(s: McpSession): void {
+  try { dashServer?.stop(); } catch { /* ignore */ }
+  dashServer = null;
   try { s.client.shutdown(); } catch { /* ignore */ }
   try { s.proc.kill(); }       catch { /* ignore */ }
   try { rmSync(s.sandbox, { recursive: true, force: true }); } catch { /* ignore */ }
