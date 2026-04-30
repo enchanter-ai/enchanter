@@ -130,10 +130,27 @@ export class DashboardServer {
 
     this.wss.on('connection', (ws: WebSocket) => {
       this.onClientConnected(ws, bus);
+      // Producer clients (enchanter mcp-wrap / watch / run) push events here.
+      // Re-publish them onto the local bus so plugins evaluate, and broadcast
+      // to other consumers. Format: { kind: 'event', event: EnchantedEvent }.
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString()) as { kind?: string; event?: EnchantedEvent };
+          if (msg.kind === 'event' && msg.event && typeof msg.event.topic === 'string') {
+            void bus.publish(msg.event.topic, msg.event);
+          }
+        } catch { /* ignore malformed */ }
+      });
     });
 
-    this.httpServer.listen(this.port, () => {
-      console.log(`[dashboard-server] listening on http://localhost:${this.port} (ws://.../ws)`);
+    // Listen silently — the inspector's TUI owns the screen; a stray
+    // console.log would corrupt the frame buffer. The port + path are
+    // already documented; no startup banner needed.
+    this.httpServer.listen(this.port);
+    this.httpServer.on('error', (err) => {
+      // Port in-use is non-fatal: another inspector is already running.
+      // Producer subprocesses will fan into THAT one. Stay quiet.
+      void err;
     });
 
     // ── Bus subscriptions ─────────────────────────────────────────────────
