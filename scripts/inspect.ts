@@ -167,7 +167,12 @@ interface InspectorState {
   activeWorkflow:  number;  // index into workflows[]
   // High-priority events that the developer should NOT miss.
   alertBuffer:     EnchantedEvent[];
+  // Which sub-panel currently owns the keyboard. Tab cycles.
+  focusedPane:     PaneId;
 }
+
+type PaneId = 'plugins' | 'events' | 'alerts';
+const PANE_ORDER: PaneId[] = ['plugins', 'events', 'alerts'];
 
 interface Workflow {
   id:       string;
@@ -220,6 +225,7 @@ function makeState(): InspectorState {
     }],
     activeWorkflow:  0,
     alertBuffer:     [],
+    focusedPane:     'plugins',
   };
 }
 
@@ -429,9 +435,15 @@ function render(): void {
     ];
     const alertRows = buildAlertLines(innerW - 2);
 
-    const pluginsPanel = renderSubPanel(pluginsW, 'plugins · on/off', pluginRows, PANEL_BODY_ROWS);
+    const pluginsPanel = renderSubPanel(
+      pluginsW, 'plugins · on/off', pluginRows, PANEL_BODY_ROWS,
+      state.focusedPane === 'plugins',
+    );
     const eventsPanel  = wide
-      ? renderSubPanel(eventsW, 'recent events', eventRows, PANEL_BODY_ROWS)
+      ? renderSubPanel(
+          eventsW, 'recent events', eventRows, PANEL_BODY_ROWS,
+          state.focusedPane === 'events',
+        )
       : null;
 
     if (wide && eventsPanel) {
@@ -448,7 +460,10 @@ function render(): void {
 
     // Alerts panel — full inside width, rendered below the side-by-side
     // panels (or below the plugins panel on narrow terminals).
-    const alertsPanel = renderSubPanel(innerW, 'alerts · don\'t miss', alertRows, 4);
+    const alertsPanel = renderSubPanel(
+      innerW, 'alerts · don\'t miss', alertRows, 4,
+      state.focusedPane === 'alerts',
+    );
     for (const row of alertsPanel) lines.push(frameRow(W, ` ${row}`));
   }
 
@@ -1034,44 +1049,53 @@ function installKeyboard(): void {
       return;
     }
 
+    // ─── Global keys ──────────────────────────────────────────────────
     if (key === 'q' || key === '\x03') { gracefulExit(); return; }
     if (key === 'p') { togglePause(); return; }
-
-    // Plugin selection + on/off toggle.
-    //   1..9  → select that plugin (positions match ALL_PLUGINS order)
-    //   t      → toggle the currently-selected plugin on/off
-    //   T      → toggle ALL plugins
-    if (key >= '1' && key <= '9') {
-      const idx = parseInt(key, 10) - 1;
-      if (idx < PLUGIN_KEYS.length) {
-        state.selectedPlugin = PLUGIN_KEYS[idx] ?? null;
-        scheduleRender();
-      }
-      return;
-    }
-    if (key === 't') {
-      const sel = state.selectedPlugin;
-      if (sel) togglePlugin(sel);
-      return;
-    }
-    if (key === 'T') {
-      const allOff = PLUGIN_KEYS.every((k) => state.disabledPlugins.has(k));
-      if (allOff) state.disabledPlugins.clear();
-      else        for (const k of PLUGIN_KEYS) state.disabledPlugins.add(k);
+    if (key === '\t') {
+      // Tab cycles pane focus forward (lazygit / k9s / bottom convention).
+      const i = PANE_ORDER.indexOf(state.focusedPane);
+      state.focusedPane = PANE_ORDER[(i + 1) % PANE_ORDER.length] ?? 'plugins';
       scheduleRender();
       return;
+    }
+
+    // ─── Pane-scoped keys: PLUGINS pane ───────────────────────────────
+    // Only fire when plugins pane has focus, so 't' doesn't accidentally
+    // toggle a plugin when the user is reading events.
+    if (state.focusedPane === 'plugins') {
+      if (key >= '1' && key <= '9') {
+        const idx = parseInt(key, 10) - 1;
+        if (idx < PLUGIN_KEYS.length) {
+          state.selectedPlugin = PLUGIN_KEYS[idx] ?? null;
+          scheduleRender();
+        }
+        return;
+      }
+      if (key === 't') {
+        const sel = state.selectedPlugin;
+        if (sel) togglePlugin(sel);
+        return;
+      }
+      if (key === 'T') {
+        const allOff = PLUGIN_KEYS.every((k) => state.disabledPlugins.has(k));
+        if (allOff) state.disabledPlugins.clear();
+        else        for (const k of PLUGIN_KEYS) state.disabledPlugins.add(k);
+        scheduleRender();
+        return;
+      }
+      if (key === 'S') {
+        const cycle: SidebarSort[] = ['recent', 'name', 'veto'];
+        const idx = cycle.indexOf(state.sort);
+        state.sort = cycle[(idx + 1) % cycle.length] ?? 'recent';
+        scheduleRender();
+        return;
+      }
     }
 
     if (key === '/') {
       state.inputMode   = 'filter';
       state.filterDraft = state.filter;
-      scheduleRender();
-      return;
-    }
-    if (key === 'S') {
-      const cycle: SidebarSort[] = ['recent', 'name', 'veto'];
-      const idx = cycle.indexOf(state.sort);
-      state.sort = cycle[(idx + 1) % cycle.length] ?? 'recent';
       scheduleRender();
       return;
     }
@@ -1110,10 +1134,13 @@ function installKeyboard(): void {
         });
       return;
     }
-    if (key === '\t') {
-      // Tab cycles the active workflow tab.
+    if (key === ']' || key === '[') {
+      // Workflow tab cycle moved off Tab (which is now pane focus).
+      // ] = next, [ = prev. Only does anything when ≥2 tabs exist.
       if (state.workflows.length > 1) {
-        state.activeWorkflow = (state.activeWorkflow + 1) % state.workflows.length;
+        const n = state.workflows.length;
+        const delta = key === ']' ? 1 : n - 1;
+        state.activeWorkflow = (state.activeWorkflow + delta) % n;
         scheduleRender();
       }
       return;

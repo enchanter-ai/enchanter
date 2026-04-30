@@ -1141,10 +1141,15 @@ export function renderSubPanel(
   title: string,
   rows: ReadonlyArray<string>,
   minRowsInside: number,
+  focused: boolean = false,
 ): string[] {
   const inside = Math.max(4, width - 2);
-  const titlePart = ` ${A.label}${title}${A.reset} `;
-  const titleVis = title.length + 2;
+  // Focused pane shows ▸ marker in title and uses amber for the title text;
+  // unfocused panes stay in label grey. Pattern from lazygit / k9s focus model.
+  const focusMark = focused ? `${A.amber}▸${A.reset}` : ' ';
+  const titleColor = focused ? A.amber : A.label;
+  const titlePart = ` ${focusMark}${titleColor}${title}${A.reset} `;
+  const titleVis = 1 + 1 + title.length + 1; // mark + space + title + trailing space
   const fillTop  = Math.max(0, inside - titleVis - 1);
   const top = `${A.border}${BOX.stl}${BOX.h}${A.reset}${titlePart}${A.border}${BOX.h.repeat(fillTop)}${BOX.str}${A.reset}`;
   const bot = `${A.border}${BOX.sbl}${BOX.h.repeat(inside)}${BOX.sbr}${A.reset}`;
@@ -1303,13 +1308,16 @@ export function renderHelpLines(): string[] {
     row('x',            'run red-team script'),
     row('c',            'clear: reset filter, sort, scroll'),
     row('p',            'pause / resume event stream'),
+    row('Tab',          'cycle pane focus (plugins → events → alerts)'),
+    row('] / [',        'next / prev workflow tab'),
+    '',
+    `  ${A.label}── Plugins pane (when focused) ──${A.reset}`,
     row('1..9',         'select plugin row (1=pech, 2=emu, …)'),
     row('t',            'toggle selected plugin on/off'),
     row('T',            'toggle ALL plugins on/off'),
-    row('Tab',          'switch active workflow tab'),
+    row('S',            'cycle sort: recent → name → veto'),
     row('/',            'enter filter mode (substring on topic)'),
     row('Esc',          'cancel filter (or exit help)'),
-    row('S',            'cycle sort: recent → name → veto'),
     row('↑ / ↓',        'scroll history (auto-pauses)'),
     row('Home / End',   'jump to oldest / live tail'),
     row('?',            'toggle this help overlay'),
