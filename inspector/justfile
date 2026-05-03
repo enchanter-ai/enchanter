@@ -1,0 +1,42 @@
+# Common dev cycles. Install just: https://github.com/casey/just
+# Run:  just <recipe>
+
+set windows-shell := ["cmd.exe", "/c"]
+
+# default: list recipes
+default:
+    @just --list
+
+# Compile-check the crate (no codegen).
+check:
+    cargo check --all-targets
+
+# Strict check: format + clippy + check, exactly what CI runs.
+ci:
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
+    cargo check --all-targets
+
+# Run the inspector against the bundled fixture (paced replay).
+demo:
+    cargo run --example demo_emit | cargo run
+
+# Same demo at 4x speed.
+demo-fast:
+    cargo run --example demo_emit -- --speed 4 | cargo run
+
+# Format the whole crate.
+fmt:
+    cargo fmt --all
+
+# Run the test suite.
+test:
+    cargo test --all-targets
+
+# Build a release binary.
+build:
+    cargo build --release
+
+# Wipe build artifacts.
+clean:
+    cargo clean

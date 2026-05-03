@@ -1,0 +1,52 @@
+{"type":"session.started","time":0.001,"session_id":"abc123","workspace":"my-project","env":"production"}
+{"type":"plugin.loaded","time":0.012,"plugin":"pech"}
+{"type":"plugin.loaded","time":0.013,"plugin":"emu"}
+{"type":"plugin.loaded","time":0.014,"plugin":"hydra"}
+{"type":"plugin.loaded","time":0.015,"plugin":"sylph"}
+{"type":"plugin.loaded","time":0.016,"plugin":"lich"}
+{"type":"plugin.loaded","time":0.017,"plugin":"naga"}
+{"type":"plugin.loaded","time":0.018,"plugin":"crow"}
+{"type":"plugin.loaded","time":0.019,"plugin":"djinn"}
+{"type":"plugin.loaded","time":0.020,"plugin":"gorgon"}
+{"type":"plugin.loaded","time":0.021,"plugin":"wixie"}
+{"type":"runtime.metrics","time":0.500,"open_sessions":3,"ongoing_tasks":7,"queued_tasks":2,"blocked_tasks":1,"code_written_lifetime_loc":42800,"code_modified_lifetime_loc":118400,"files_created_lifetime":86,"files_modified_lifetime":312,"tool_calls_lifetime":9400,"prs_created_lifetime":18,"tests_run_lifetime":2100,"tests_passed_rate":0.96,"total_spend_lifetime":184.2}
+{"type":"task.created","time":1.100,"task_id":"T-104","session_id":"abc123","intent":"optimize routing","file_or_area":"router.ts","risk":"low"}
+{"type":"djinn.anchor","time":1.250,"plugin":"djinn","session_id":"abc123","intent":"optimize routing"}
+{"type":"phase.entered","time":1.300,"session_id":"abc123","phase":"anchor"}
+{"type":"phase.completed","time":1.420,"session_id":"abc123","phase":"anchor"}
+{"type":"phase.entered","time":1.430,"session_id":"abc123","phase":"trust-gate"}
+{"type":"lich.review","time":1.500,"plugin":"lich","session_id":"abc123","severity":"info","message":"sandbox check passed"}
+{"type":"crow.trust","time":1.560,"plugin":"crow","session_id":"abc123","trust_score":0.84}
+{"type":"sylph.veto","time":1.580,"plugin":"sylph","session_id":"abc123","severity":"high","policy":"force-push","reason":"force push to protected branch","action":"blocked"}
+{"type":"hydra.veto","time":1.600,"plugin":"hydra","session_id":"abc123","severity":"critical","policy":"h-rm-rf-root","reason":"blocked destructive root command","action":"blocked","payload":{"command":"rm -rf /","risk":"critical"}}
+{"type":"phase.completed","time":1.700,"session_id":"abc123","phase":"trust-gate"}
+{"type":"phase.entered","time":1.710,"session_id":"abc123","phase":"pre-dispatch"}
+{"type":"emu.context_update","time":1.800,"plugin":"emu","session_id":"abc123","context_size":18000,"turn_estimate":25}
+{"type":"phase.completed","time":1.900,"session_id":"abc123","phase":"pre-dispatch"}
+{"type":"phase.entered","time":1.910,"session_id":"abc123","phase":"dispatch"}
+{"type":"tool.call","time":2.100,"session_id":"abc123","task_id":"T-104","phase":"dispatch","plugin":"tool","tool":"read_file","payload":{"path":"src/router.ts","risk":"low"}}
+{"type":"tool.result","time":2.180,"session_id":"abc123","task_id":"T-104","plugin":"tool","tool":"read_file"}
+{"type":"pech.ledger","time":2.200,"session_id":"abc123","task_id":"T-104","phase":"post-response","plugin":"pech","payload":{"input_tokens":1200,"output_tokens":380,"cost_usd":0.006,"session_cost_usd":0.42,"daily_cost_usd":5.12}}
+{"type":"tool.call","time":2.500,"session_id":"abc123","task_id":"T-104","phase":"dispatch","plugin":"tool","tool":"list_directory","payload":{"path":"src/","risk":"low"}}
+{"type":"tool.result","time":2.560,"session_id":"abc123","task_id":"T-104","plugin":"tool","tool":"list_directory"}
+{"type":"task.updated","time":2.600,"task_id":"T-104","session_id":"abc123","status":"running","intent":"optimize routing","file_or_area":"router.ts","phase":"dispatch","risk":"low","age_seconds":2}
+{"type":"naga.spec_check","time":2.800,"plugin":"naga","session_id":"abc123","file":"router.ts","status":"clean","drift":0}
+{"type":"gorgon.hotspot","time":2.900,"plugin":"gorgon","session_id":"abc123","file":"router.ts","heat":"high"}
+{"type":"code.modified","time":3.000,"session_id":"abc123","task_id":"T-104","file":"router.ts","language":"typescript","lines_added":42,"lines_removed":11,"lines_modified":53}
+{"type":"file.modified","time":3.010,"session_id":"abc123","task_id":"T-104","file":"router.ts"}
+{"type":"djinn.drift","time":3.200,"plugin":"djinn","session_id":"abc123","severity":"info","drift_score":0.05,"current_intent":"optimize routing"}
+{"type":"task.created","time":3.500,"task_id":"T-105","session_id":"def456","intent":"update auth middleware","file_or_area":"auth.ts","risk":"medium"}
+{"type":"task.updated","time":4.100,"task_id":"T-105","session_id":"def456","status":"waiting_review","intent":"update auth middleware","file_or_area":"auth.ts","phase":"post-response","risk":"medium","age_seconds":4}
+{"type":"task.blocked","time":5.000,"task_id":"T-106","session_id":"ghi789","intent":"force push fix branch","file_or_area":"git","phase":"trust-gate","risk":"high","blocked_reason":"force-push policy"}
+{"type":"test.run","time":5.500,"session_id":"abc123","task_id":"T-104"}
+{"type":"test.passed","time":5.700,"session_id":"abc123","task_id":"T-104"}
+{"type":"plugin.health","time":6.000,"plugin":"gorgon","status":"warning","health":0.72,"latency_p95_ms":18.0,"latency_p99_ms":34.0}
+{"type":"runtime.metrics","time":6.200,"open_sessions":3,"ongoing_tasks":7,"queued_tasks":2,"blocked_tasks":1,"code_written_lifetime_loc":42842,"code_modified_lifetime_loc":118453,"files_created_lifetime":86,"files_modified_lifetime":313,"tool_calls_lifetime":9402,"prs_created_lifetime":18,"tests_run_lifetime":2101,"tests_passed_rate":0.96,"total_spend_lifetime":184.21}
+{"type":"task.completed","time":7.000,"task_id":"T-104","session_id":"abc123","intent":"optimize routing","file_or_area":"router.ts","risk":"low"}
+{"type":"phase.completed","time":7.020,"session_id":"abc123","phase":"dispatch"}
+{"type":"phase.entered","time":7.030,"session_id":"abc123","phase":"post-response"}
+{"type":"phase.completed","time":7.500,"session_id":"abc123","phase":"post-response"}
+{"type":"pr.created","time":8.000,"session_id":"abc123","task_id":"T-104","pr_number":219,"branch":"router-opt"}
+{"type":"phase.entered","time":8.100,"session_id":"abc123","phase":"post-session"}
+{"type":"phase.completed","time":8.300,"session_id":"abc123","phase":"post-session"}
+{"type":"session.closed","time":8.500,"session_id":"abc123"}
