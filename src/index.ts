@@ -24,8 +24,24 @@ export {
 
 // OAuth
 export { generateCodeVerifier, deriveS256Challenge, verifyS256, validateVerifier } from './oauth/pkce.js';
-export { validateAudience, buildResourceParameter, AudienceMismatchError } from './oauth/resource-indicators.js';
+export {
+  validateAudience,
+  buildResourceParameter,
+  AudienceMismatchError,
+  bindReplayDefense,
+  consumeReplayDefense,
+  ReplayDefenseError,
+} from './oauth/resource-indicators.js';
+export type { ReplayDefenseParams } from './oauth/resource-indicators.js';
 export { validateMetadataUrl, SsrfRejectionError } from './oauth/metadata-validator.js';
+export {
+  InMemoryReplayStore,
+  PersistentReplayStore,
+  DEFAULT_FRESHNESS_SECONDS,
+  MAX_ENTRIES,
+} from './oauth/replay-store.js';
+export type { ReplayStore, ConsumeResult, ConsumeFailure } from './oauth/replay-store.js';
+export { generateNonce, encodeTimestamp, parseTimestamp, isFresh } from './oauth/nonce.js';
 
 // Registry
 export {
