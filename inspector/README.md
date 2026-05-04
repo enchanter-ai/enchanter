@@ -1,5 +1,9 @@
 # enchanter-inspector
 
+<p align="center">
+  <img src="docs/assets/hero.png" alt="Enchanter Inspector — terminal cockpit for the Enchanter AI runtime" width="1280">
+</p>
+
 Terminal-first TUI cockpit for the [Enchanter](../) AI runtime — think `htop` / `btop` / `k9s` / `lazygit`, but for an AI agent runtime.
 
 > **Terminal is the cockpit. Web/Electron is the studio.**

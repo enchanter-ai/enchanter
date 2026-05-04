@@ -4,8 +4,8 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 <p align="center">
-  <a href="https://enchanter-ai.github.io/enchanter">
-    <img src="docs/hero.svg" alt="Enchanter — real-time MCP observability monitor" width="900">
+  <a href="inspector/">
+    <img src="inspector/docs/assets/hero.png" alt="Enchanter Inspector — terminal cockpit for the Enchanter AI runtime" width="1280">
   </a>
 </p>
 
@@ -13,7 +13,7 @@
 
 Enchanter is a TypeScript SDK for building agentic AI applications that speak [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It wraps every outbound tool call in a 7-phase orchestrator lifecycle, runs it through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow, and more) observe, modify, or block before the request leaves your process.
 
-**v0.2.2 — verified live against `@modelcontextprotocol/server-filesystem`.** 144 tests / 7 todo / 0 fail. 14/14 stress scenarios pass. Two observability surfaces ship: a long-running boxed CLI inspector (`npm run inspect`) and a native VS Code extension (TreeViews + StatusBar + WelcomeView, no webview).
+**v0.2.2 — verified live against `@modelcontextprotocol/server-filesystem`.** 144 tests / 7 todo / 0 fail. 14/14 stress scenarios pass. Observability ships as a Rust terminal cockpit ([`inspector/`](inspector/)) — htop / btop / k9s for an AI agent runtime — that consumes the runtime's JSONL event stream over stdin, file, or socket.
 
 ## Install
 
@@ -99,7 +99,7 @@ npx tsx scripts/demo-live.ts
 
 Spawns the official `@modelcontextprotocol/server-filesystem`, runs through all 7 phases, and shows hydra masking real AWS-key-shaped strings + bearer tokens in file content, and vetoing synthetic `rm -rf /` and `cat ~/.ssh/id_rsa` calls on the bus.
 
-Enchanter ships two observability surfaces: a long-running CLI inspector (`npm run inspect`, lives in your terminal) and a VS Code extension (lives in your editor). The browser dashboard was intentionally dropped at v0.2.1 — see `IMPLEMENTATION_SUMMARY.md`.
+Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — single binary, reads the runtime's JSONL event stream from stdin / file / socket, renders 10 live views (overview, plugins, events, security, cost, drift, codebase, replay, runtime totals, active tasks). The earlier TS CLI inspector and VS Code extension were retired at v0.3 in favor of the terminal-first approach. The browser dashboard was intentionally dropped at v0.2.1 — see `IMPLEMENTATION_SUMMARY.md`.
 
 ## Architecture
 
