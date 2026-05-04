@@ -82,6 +82,13 @@ function lcsRatio(a: string[], b: string[]): number {
 // in-process representation only.
 const ANCHORS = new Map<string, SessionAnchor>();
 
+// TODO(v0.3.1): D2 HMM drift labelling — see docs/v0.3/djinn-d2-hmm.md.
+// Lands as src/plugins/djinn/hmm.ts (Baum-Welch + Viterbi over the
+// ON_TASK / SIDEQUEST / LOST emission table). Wires into a new per-turn
+// phase handler invoked from handlePostSessionPhase; the LCS path stays
+// as the cheap pre-filter (skip HMM if LCS already > 0.6 — clearly on
+// task) and as the explainable signal in the derived event payload.
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

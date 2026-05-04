@@ -4,7 +4,15 @@
    M1 static suspicion: scans tool_schema descriptions, parameter names, and
    error templates for instruction-shaped patterns at post-response phase.
    M6 simplified: EMA-weighted false-positive rate per pattern_id; patterns with
-   FP rate > 0.5 are downweighted 50% in suspicion scoring. Fail-closed. */
+   FP rate > 0.5 are downweighted 50% in suspicion scoring. Fail-closed.
+
+   TODO(v0.3.1): M5 sandbox — see docs/v0.3/lich-m5-sandbox.md. The sandbox
+   confirmation step lands as a sibling module (src/plugins/lich/sandbox.ts)
+   wired in at the suspicionScore < VETO_THRESHOLD branch: instead of an
+   advisory ack with degraded=true, we'd run the tool call inside a
+   resource-bounded child_process and compare its observed output shape
+   against the static schema before publishing the result. Do not modify
+   scanToolSchema or the M1/M6 surfaces when landing M5. */
 
 import type { PluginAdapter } from './plugin-contract.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';

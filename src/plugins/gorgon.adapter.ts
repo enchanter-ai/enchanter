@@ -3,7 +3,14 @@
    Source refs: plugins/gorgon source (G3 PageRank, G1 Tarjan deferred to v0.3).
    v0.2: language-agnostic import-graph PageRank only.
    Tarjan SCC (G1) is deferred to v0.3 per the spec boundary. [author judgment]
-   Advisory — fail-open. */
+   Advisory — fail-open.
+
+   TODO(v0.3.1): G1 Tarjan SCC + Python AST extraction —
+   see docs/v0.3/gorgon-tarjan-python-ast.md. Tarjan lands as a sibling
+   src/plugins/gorgon/scc.ts called from handleCrossSession after
+   computePageRank; cycles emit a new gorgon.cycle.detected derived event.
+   Python-AST edge extraction lands as src/plugins/gorgon/python-ast.ts —
+   a stdlib regex/AST walker (no new deps) feeding setGraph(). */
 
 import type { PluginAdapter } from './plugin-contract.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
