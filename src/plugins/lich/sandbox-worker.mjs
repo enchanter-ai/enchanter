@@ -166,6 +166,18 @@ process.on('message', (msg) => {
     }
     return;
   }
+  if (msg.kind === 'tool-confirm-live') {
+    // v0.4 #1: live MCP-server replay runs in the parent process so the
+    // injected transportFactory (which carries non-serializable function
+    // state) can be applied. Forking into the worker for the live variant is
+    // reserved for the no-factory production path; until that lands the
+    // worker rejects this kind explicitly so silent drops don't mask bugs.
+    process.send?.({
+      ok: false,
+      error: 'tool-confirm-live should run in parent (no transportFactory injection over IPC)',
+    });
+    return;
+  }
 });
 
 // Signal readiness so the parent knows IPC is live.

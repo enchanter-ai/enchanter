@@ -20,11 +20,16 @@ import type { RequestContext } from '../orchestration/request-context.js';
 import {
   runSandboxedReview,
   runSandboxedToolCall,
+  runSandboxedToolCallLive,
   type SandboxResult,
   type SandboxOptions,
   type ToolConfirmResult,
   type ToolConfirmDifference,
+  type LiveTransportFactory,
+  type ServerDescriptor,
 } from './lich/sandbox.js';
+import { ReplayCache } from './lich/replay-cache.js';
+import { createHash } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
 // Pattern catalogue — [author judgment] on the 5 pattern categories
@@ -196,6 +201,13 @@ type ToolConfirmRunner = (
   originalResponse: unknown,
   options: SandboxOptions,
 ) => Promise<ToolConfirmResult>;
+type ToolConfirmLiveRunner = (
+  toolName: string,
+  params: unknown,
+  originalResponse: unknown,
+  serverDescriptor: ServerDescriptor,
+  options: SandboxOptions & { transportFactory: LiveTransportFactory },
+) => Promise<ToolConfirmResult>;
 
 interface LichConfig {
   m5_sandbox: boolean;
@@ -206,6 +218,14 @@ interface LichConfig {
   m5_tool_confirm: boolean;
   /** Test-only injection point. Defaults to runSandboxedToolCall. */
   m5_tool_confirm_runner: ToolConfirmRunner;
+  /** v0.4 #1 — real-MCP-server replay variant; default OFF. */
+  m5_tool_confirm_live: boolean;
+  /** Test-only injection point. Defaults to runSandboxedToolCallLive. */
+  m5_tool_confirm_live_runner: ToolConfirmLiveRunner;
+  /** Required when m5_tool_confirm_live is on — produces a fresh transport. */
+  m5_transport_factory: LiveTransportFactory | undefined;
+  /** LRU cache for live replay results, keyed by (schemaDigest, argsDigest). */
+  m5_replay_cache: ReplayCache;
 }
 
 const config: LichConfig = {
@@ -214,6 +234,10 @@ const config: LichConfig = {
   m5_sandbox_runner: runSandboxedReview,
   m5_tool_confirm: false,
   m5_tool_confirm_runner: runSandboxedToolCall,
+  m5_tool_confirm_live: false,
+  m5_tool_confirm_live_runner: runSandboxedToolCallLive,
+  m5_transport_factory: undefined,
+  m5_replay_cache: new ReplayCache(256),
 };
 
 /** Test/runtime hook to flip the M5 sandbox flag, tune its budget, or inject a stub runner. */
@@ -223,6 +247,41 @@ export function configureLich(patch: Partial<LichConfig>): void {
   if (patch.m5_sandbox_runner !== undefined) config.m5_sandbox_runner = patch.m5_sandbox_runner;
   if (patch.m5_tool_confirm !== undefined) config.m5_tool_confirm = patch.m5_tool_confirm;
   if (patch.m5_tool_confirm_runner !== undefined) config.m5_tool_confirm_runner = patch.m5_tool_confirm_runner;
+  if (patch.m5_tool_confirm_live !== undefined) config.m5_tool_confirm_live = patch.m5_tool_confirm_live;
+  if (patch.m5_tool_confirm_live_runner !== undefined) {
+    config.m5_tool_confirm_live_runner = patch.m5_tool_confirm_live_runner;
+  }
+  // Use `in` so callers can explicitly reset the factory back to undefined
+  // (an `!== undefined` guard would silently drop the reset).
+  if ('m5_transport_factory' in patch) config.m5_transport_factory = patch.m5_transport_factory;
+  if (patch.m5_replay_cache !== undefined) config.m5_replay_cache = patch.m5_replay_cache;
+}
+
+/** Test-only: surface the live cache for assertions. */
+export function getLichReplayCache(): ReplayCache {
+  return config.m5_replay_cache;
+}
+
+// SHA-256 over a stable JSON serialization. For args we sort keys at every
+// object level so {a:1,b:2} and {b:2,a:1} hash identically.
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  const obj = v as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}';
+}
+
+function sha256Hex(input: string): string {
+  return createHash('sha256').update(input).digest('hex');
+}
+
+function digestSchema(schema: unknown): string {
+  return sha256Hex(stableStringify(schema ?? null));
+}
+
+function digestArgs(args: unknown): string {
+  return sha256Hex(stableStringify(args ?? null));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +317,35 @@ export const lichAdapter: PluginAdapter = {
       const hasResponse = 'response' in (event.payload as object);
       if (toolName !== null && hasResponse) {
         ack = await augmentWithToolConfirm(ack, event, toolName, p.args, p.response);
+      }
+    }
+
+    if (config.m5_tool_confirm_live && ack.status !== 'veto') {
+      const p = event.payload as {
+        tool?: unknown;
+        tool_schema?: unknown;
+        args?: unknown;
+        response?: unknown;
+        server_descriptor?: unknown;
+      };
+      const toolName = typeof p.tool === 'string' ? p.tool : null;
+      const hasResponse = 'response' in (event.payload as object);
+      const factory = config.m5_transport_factory;
+      if (toolName !== null && hasResponse && factory !== undefined) {
+        const descriptor: ServerDescriptor =
+          p.server_descriptor && typeof p.server_descriptor === 'object'
+            ? (p.server_descriptor as ServerDescriptor)
+            : {};
+        ack = await augmentWithToolConfirmLive(
+          ack,
+          event,
+          toolName,
+          p.args,
+          p.response,
+          p.tool_schema,
+          descriptor,
+          factory,
+        );
       }
     }
 
@@ -373,6 +461,99 @@ async function augmentWithToolConfirm(
       reason: baseAck.reason
         ? `${baseAck.reason}; lich-tool-confirm-divergence:${diffSummary}`
         : `lich-tool-confirm-divergence:${diffSummary}`,
+      derived_events: derived,
+    };
+  }
+
+  return {
+    ...baseAck,
+    derived_events: derived,
+  };
+}
+
+async function augmentWithToolConfirmLive(
+  baseAck: PluginAck,
+  event: EnchantedEvent,
+  toolName: string,
+  params: unknown,
+  originalResponse: unknown,
+  toolSchema: unknown,
+  serverDescriptor: ServerDescriptor,
+  transportFactory: LiveTransportFactory,
+): Promise<PluginAck> {
+  const cache = config.m5_replay_cache;
+  const schemaDigest = digestSchema(toolSchema);
+  const argsDigest = digestArgs(params);
+  const cacheKey = cache.key(schemaDigest, argsDigest);
+
+  let result: ToolConfirmResult | undefined = cache.get(cacheKey);
+  const cacheHit = result !== undefined;
+
+  if (!cacheHit) {
+    result = await config.m5_tool_confirm_live_runner(
+      toolName,
+      params,
+      originalResponse,
+      serverDescriptor,
+      { time_budget_ms: config.m5_time_budget_ms, transportFactory },
+    );
+    cache.set(cacheKey, result);
+  }
+
+  // result is defined: either retrieved from cache or just produced by the
+  // runner above. Narrow for noUncheckedIndexedAccess.
+  const finalResult = result as ToolConfirmResult;
+
+  const confirmEvent: EnchantedEvent = {
+    id: `${event.correlation_id}::lich-tool-confirm-live`,
+    correlation_id: event.correlation_id,
+    session_id: event.session_id,
+    phase: event.phase,
+    topic: 'lich.sandbox.executed',
+    source: 'lich',
+    budget_tier: event.budget_tier,
+    ts: Date.now(),
+    payload: finalResult.failed
+      ? {
+          variant: 'tool-confirm-live',
+          failed: true,
+          reason: finalResult.reason,
+          elapsed_ms: finalResult.elapsed_ms,
+          cache_hit: cacheHit,
+        }
+      : {
+          variant: 'tool-confirm-live',
+          failed: false,
+          ok: finalResult.ok,
+          differences: finalResult.differences,
+          elapsed_ms: finalResult.elapsed_ms,
+          cache_hit: cacheHit,
+        },
+  };
+
+  const derived = [...(baseAck.derived_events ?? []), confirmEvent];
+
+  if (finalResult.failed) {
+    return {
+      ...baseAck,
+      status: baseAck.status,
+      degraded: true,
+      reason: baseAck.reason
+        ? `${baseAck.reason}; lich-tool-confirm-live-${finalResult.reason}`
+        : `lich-tool-confirm-live-${finalResult.reason}`,
+      derived_events: derived,
+    };
+  }
+
+  if (!finalResult.ok) {
+    const diffSummary = summarizeDiff(finalResult.differences);
+    return {
+      ...baseAck,
+      status: baseAck.status,
+      degraded: true,
+      reason: baseAck.reason
+        ? `${baseAck.reason}; lich-tool-confirm-live-divergence:${diffSummary}`
+        : `lich-tool-confirm-live-divergence:${diffSummary}`,
       derived_events: derived,
     };
   }

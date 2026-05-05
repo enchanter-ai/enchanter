@@ -4,11 +4,15 @@
    over IPC, sends a code string in, reads structured findings out. The
    worker is killed on time-budget exceeded or memory cap. All failure
    paths return a SandboxResult with failed:true and a reason — never
-   throws to the caller. Stdlib only (node:child_process, node:url). */
+   throws to the caller. Stdlib only (node:child_process, node:url).
+
+   v0.4 #1 adds runSandboxedToolCallLive — real-MCP-server replay variant.
+   The mock-projection runSandboxedToolCall stays for back-compat tests. */
 
 import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import type { JsonRpcMessage } from '../../protocol/jsonrpc.js';
 
 export interface SandboxOptions {
   /** Wall-clock budget in ms before the worker is SIGKILLed. Default: 5000. */
@@ -390,4 +394,204 @@ export async function runSandboxedToolCall(
       }
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// v0.4 #1 — REAL-MCP-SERVER REPLAY (runSandboxedToolCallLive)
+// ---------------------------------------------------------------------------
+
+/** Minimal transport surface the live-replay path needs.
+ *  Matches src/client/mcp-client.ts's `Transport` shape so production callers
+ *  can pass a real StdioTransport / StreamableHttpTransport. Tests pass a
+ *  small in-process stub. */
+export interface LiveReplayTransport {
+  send(msg: JsonRpcMessage): Promise<void>;
+  recv(): AsyncIterableIterator<JsonRpcMessage>;
+  shutdown?: () => Promise<void> | void;
+}
+
+/** Server descriptor — opaque metadata the transportFactory needs to spawn a
+ *  fresh server. Stays a Record so callers can pin different fields per
+ *  transport (stdio: cmd/args/env; http: endpoint/auth) without bloating the
+ *  contract. */
+export type ServerDescriptor = Record<string, unknown>;
+
+/** Caller-supplied factory that constructs a transport for a fresh replay.
+ *  Throwing here surfaces as `failed: true, reason: 'spawn-error'`. */
+export type LiveTransportFactory = (
+  descriptor: ServerDescriptor,
+) => Promise<LiveReplayTransport> | LiveReplayTransport;
+
+export interface LiveSandboxOptions extends SandboxOptions {
+  /** Required: how to spin up the replay transport. */
+  readonly transportFactory: LiveTransportFactory;
+}
+
+/** Same diff routine as the worker's, mirrored in TS. Kept narrow on purpose:
+ *  primitives + plain objects + arrays. Arrays of primitives → multiset; arrays
+ *  of structured items → ordered. Mixed-type or value mismatches yield one diff
+ *  entry at the divergence path. */
+function liveDiff(
+  a: unknown,
+  b: unknown,
+  path: ReadonlyArray<string | number> = [],
+): ToolConfirmDifference[] {
+  const diffs: ToolConfirmDifference[] = [];
+  if (Object.is(a, b)) return diffs;
+
+  const isObj = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+
+  if (isObj(a) && isObj(b)) {
+    const keys = new Set<string>([...Object.keys(a), ...Object.keys(b)]);
+    for (const k of keys) {
+      diffs.push(...liveDiff(a[k], b[k], [...path, k]));
+    }
+    return diffs;
+  }
+
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) {
+      diffs.push({ path, original: a, replayed: b });
+      return diffs;
+    }
+    const isPrimArr = (arr: unknown[]): boolean =>
+      arr.every((x) => x === null || (typeof x !== 'object' && typeof x !== 'function'));
+    if (isPrimArr(a) && isPrimArr(b)) {
+      const sa = [...a].map(String).sort();
+      const sb = [...b].map(String).sort();
+      for (let i = 0; i < sa.length; i++) {
+        if (sa[i] !== sb[i]) {
+          diffs.push({ path, original: a, replayed: b });
+          return diffs;
+        }
+      }
+      return diffs;
+    }
+    for (let i = 0; i < a.length; i++) {
+      diffs.push(...liveDiff(a[i], b[i], [...path, i]));
+    }
+    return diffs;
+  }
+
+  diffs.push({ path, original: a, replayed: b });
+  return diffs;
+}
+
+/** Drive a `tools/call` over the supplied transport, awaiting the response
+ *  by JSON-RPC id. Returns the `result` field (or throws on JSON-RPC error). */
+async function callViaTransport(
+  transport: LiveReplayTransport,
+  toolName: string,
+  params: unknown,
+): Promise<unknown> {
+  const id = 1; // [author judgment] Fresh transport per replay → id=1 is unique per call.
+  const argsObject =
+    params && typeof params === 'object' && !Array.isArray(params)
+      ? (params as Record<string, unknown>)
+      : {};
+  await transport.send({
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: { name: toolName, arguments: argsObject },
+  });
+  for await (const msg of transport.recv()) {
+    const m = msg as { id?: unknown; result?: unknown; error?: { message?: unknown } };
+    if (m.id === id) {
+      if (m.error !== undefined) {
+        const detail =
+          m.error && typeof m.error === 'object' && typeof m.error.message === 'string'
+            ? m.error.message
+            : 'jsonrpc-error';
+        throw new Error(detail);
+      }
+      return m.result;
+    }
+  }
+  throw new Error('transport closed before response');
+}
+
+/**
+ * v0.4 #1 — MCP TOOL-CALL CONFIRMATION (live-replay variant). Re-spawns the
+ * originating MCP server via `transportFactory(serverDescriptor)`, re-issues
+ * the captured `tools/call` with the original params, and structurally diffs
+ * the live result against `originalResponse`. Time/memory-budget contract,
+ * failure shapes, and structural-diff semantics match runSandboxedToolCall.
+ *
+ * The replay runs in the parent process: the MCP server it spawns is itself
+ * out-of-process (per the transport's contract), so the resource isolation
+ * already lives at the transport boundary. Test harnesses inject a stub
+ * `transportFactory` returning an in-process transport — keeps the test path
+ * hermetic without spawning real subprocesses.
+ *
+ * Failure modes:
+ *   - transportFactory throws  → spawn-error
+ *   - transport hangs > budget → timeout
+ *   - transport.send/recv error→ worker-error
+ *   - any other thrown error   → worker-error (with detail)
+ */
+export async function runSandboxedToolCallLive(
+  toolName: string,
+  params: unknown,
+  originalResponse: unknown,
+  serverDescriptor: ServerDescriptor,
+  options: LiveSandboxOptions,
+): Promise<ToolConfirmResult> {
+  const start = Date.now();
+  const time_budget_ms = options.time_budget_ms ?? DEFAULT_TIME_BUDGET_MS;
+
+  let transport: LiveReplayTransport;
+  try {
+    transport = await options.transportFactory(serverDescriptor);
+  } catch (err) {
+    return {
+      failed: true,
+      reason: 'spawn-error',
+      detail: err instanceof Error ? err.message : String(err),
+      elapsed_ms: Date.now() - start,
+    };
+  }
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<ToolConfirmResult>((resolveTimeout) => {
+    timeoutHandle = setTimeout(() => {
+      resolveTimeout({
+        failed: true,
+        reason: 'timeout',
+        detail: `wall-clock budget ${time_budget_ms}ms exceeded`,
+        elapsed_ms: Date.now() - start,
+      });
+    }, time_budget_ms);
+  });
+
+  const replayPromise: Promise<ToolConfirmResult> = (async () => {
+    try {
+      const replayed = await callViaTransport(transport, toolName, params);
+      const differences = liveDiff(originalResponse, replayed);
+      return {
+        failed: false,
+        ok: differences.length === 0,
+        differences,
+        elapsed_ms: Date.now() - start,
+      };
+    } catch (err) {
+      return {
+        failed: true,
+        reason: 'worker-error',
+        detail: err instanceof Error ? err.message : String(err),
+        elapsed_ms: Date.now() - start,
+      };
+    }
+  })();
+
+  const result = await Promise.race([replayPromise, timeoutPromise]);
+  if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  // Best-effort transport teardown — never throws to caller.
+  try {
+    if (transport.shutdown) {
+      await transport.shutdown();
+    }
+  } catch { /* ignore */ }
+  return result;
 }
