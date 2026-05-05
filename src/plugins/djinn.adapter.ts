@@ -15,6 +15,7 @@
 import type { PluginAdapter } from './plugin-contract.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
 import type { RequestContext } from '../orchestration/request-context.js';
+import { IntentHmm, type HmmStep } from './djinn/hmm.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,12 +83,25 @@ function lcsRatio(a: string[], b: string[]): number {
 // in-process representation only.
 const ANCHORS = new Map<string, SessionAnchor>();
 
-// TODO(v0.3.1): D2 HMM drift labelling — see docs/v0.3/djinn-d2-hmm.md.
-// Lands as src/plugins/djinn/hmm.ts (Baum-Welch + Viterbi over the
-// ON_TASK / SIDEQUEST / LOST emission table). Wires into a new per-turn
-// phase handler invoked from handlePostSessionPhase; the LCS path stays
-// as the cheap pre-filter (skip HMM if LCS already > 0.6 — clearly on
-// task) and as the explainable signal in the derived event payload.
+// ---------------------------------------------------------------------------
+// D2 HMM (v0.3.1) — per-session forward-recursion drift labeller.
+// LCS stays as the cheap pre-filter; HMM reads the LCS observation per turn
+// and emits the most-likely state + posterior. Default-off via `d2_hmm`
+// config in the post-session event payload — D1 LCS behaviour unchanged
+// when the flag is absent or false.
+// ---------------------------------------------------------------------------
+
+const HMMS = new Map<string, IntentHmm>();
+
+/** Internal: get-or-create the per-session HMM. Exposed for tests via clearAnchor. */
+function getOrCreateHmm(session_id: string): IntentHmm {
+  let h = HMMS.get(session_id);
+  if (!h) {
+    h = new IntentHmm();
+    HMMS.set(session_id, h);
+  }
+  return h;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -101,6 +115,7 @@ export function getAnchor(session_id: string): SessionAnchor | undefined {
 /** Remove the anchor for the given session (e.g. on /reorient or test teardown). */
 export function clearAnchor(session_id: string): void {
   ANCHORS.delete(session_id);
+  HMMS.delete(session_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,11 +176,33 @@ function handlePostSessionPhase(event: EnchantedEvent): PluginAck {
   }
 
   const prompt = (event.payload['user_prompt'] as string | undefined) ?? '';
+  const d2Enabled = event.payload['d2_hmm'] === true;
   const currentTokens = tokenize(prompt);
   const ratio = lcsRatio(anchor.tokens, currentTokens);
 
+  // D2: when enabled, feed the LCS observation into the per-session HMM and
+  // attach the resulting state + posterior to the drift event. The HMM is
+  // updated regardless of whether D1 fires, so its forward state stays in
+  // sync with every turn.
+  let hmmStep: HmmStep | undefined;
+  if (d2Enabled) {
+    hmmStep = getOrCreateHmm(session_id).update(ratio);
+  }
+
   if (ratio >= DRIFT_THRESHOLD) {
     return { status: 'ack' };
+  }
+
+  const driftPayload: Record<string, unknown> = {
+    lcs_ratio: ratio,
+    threshold: DRIFT_THRESHOLD,
+    anchor_intent: anchor.intent,
+    current_prompt: prompt,
+  };
+  if (hmmStep) {
+    driftPayload['hmm_state'] = hmmStep.state;
+    driftPayload['hmm_posterior'] = hmmStep.posterior;
+    driftPayload['hmm_observation'] = hmmStep.observation;
   }
 
   return {
@@ -180,12 +217,7 @@ function handlePostSessionPhase(event: EnchantedEvent): PluginAck {
         source: 'djinn',
         budget_tier: event.budget_tier,
         ts: Date.now(),
-        payload: {
-          lcs_ratio: ratio,
-          threshold: DRIFT_THRESHOLD,
-          anchor_intent: anchor.intent,
-          current_prompt: prompt,
-        },
+        payload: driftPayload,
       },
     ],
   };
