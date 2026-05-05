@@ -17,6 +17,7 @@
 import type { PluginAdapter } from './plugin-contract.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
 import type { RequestContext } from '../orchestration/request-context.js';
+import { runSandboxedReview, type SandboxResult, type SandboxOptions } from './lich/sandbox.js';
 
 // ---------------------------------------------------------------------------
 // Pattern catalogue — [author judgment] on the 5 pattern categories
@@ -174,6 +175,36 @@ function scanSchema(schema: ToolSchema): SuspicionMatch[] {
 const VETO_THRESHOLD = 3;
 
 // ---------------------------------------------------------------------------
+// M5 sandbox config (v0.3.1 #4)
+// ---------------------------------------------------------------------------
+// Default OFF for back-compat — existing M1+M6 behavior is unchanged. When
+// enabled, post-response events whose payload carries `code` (string) will be
+// reviewed inside a forked child_process with a wall-clock budget. Sandbox
+// failures are advisory: the adapter continues to return the M1 verdict and
+// flags `degraded:true` on the ack.
+type SandboxRunner = (code: string, options: SandboxOptions) => Promise<SandboxResult>;
+
+interface LichConfig {
+  m5_sandbox: boolean;
+  m5_time_budget_ms: number;
+  /** Test-only injection point. Defaults to runSandboxedReview. */
+  m5_sandbox_runner: SandboxRunner;
+}
+
+const config: LichConfig = {
+  m5_sandbox: false,
+  m5_time_budget_ms: 5_000,
+  m5_sandbox_runner: runSandboxedReview,
+};
+
+/** Test/runtime hook to flip the M5 sandbox flag, tune its budget, or inject a stub runner. */
+export function configureLich(patch: Partial<LichConfig>): void {
+  if (patch.m5_sandbox !== undefined) config.m5_sandbox = patch.m5_sandbox;
+  if (patch.m5_time_budget_ms !== undefined) config.m5_time_budget_ms = patch.m5_time_budget_ms;
+  if (patch.m5_sandbox_runner !== undefined) config.m5_sandbox_runner = patch.m5_sandbox_runner;
+}
+
+// ---------------------------------------------------------------------------
 // PluginAdapter
 // ---------------------------------------------------------------------------
 
@@ -191,9 +222,67 @@ export const lichAdapter: PluginAdapter = {
     if (event.phase !== 'post-response') {
       return { status: 'ack' };
     }
-    return scanToolSchema(event);
+    const baseAck = scanToolSchema(event);
+
+    if (!config.m5_sandbox) {
+      return baseAck;
+    }
+    const code = (event.payload as { code?: unknown }).code;
+    if (typeof code !== 'string') {
+      return baseAck;
+    }
+    return augmentWithSandbox(baseAck, event, code);
   },
 };
+
+async function augmentWithSandbox(
+  baseAck: PluginAck,
+  event: EnchantedEvent,
+  code: string,
+): Promise<PluginAck> {
+  // Veto from M1 already short-circuits — don't burn a fork on a doomed call.
+  if (baseAck.status === 'veto') {
+    return baseAck;
+  }
+
+  const sandbox: SandboxResult = await config.m5_sandbox_runner(code, {
+    time_budget_ms: config.m5_time_budget_ms,
+  });
+
+  const sandboxEvent: EnchantedEvent = {
+    id: `${event.correlation_id}::lich-sandbox`,
+    correlation_id: event.correlation_id,
+    session_id: event.session_id,
+    phase: event.phase,
+    topic: 'lich.sandbox.executed',
+    source: 'lich',
+    budget_tier: event.budget_tier,
+    ts: Date.now(),
+    payload: sandbox.failed
+      ? { failed: true, reason: sandbox.reason, elapsed_ms: sandbox.elapsed_ms }
+      : { failed: false, findings: sandbox.findings, score: sandbox.score, elapsed_ms: sandbox.elapsed_ms },
+  };
+
+  const derived = [...(baseAck.derived_events ?? []), sandboxEvent];
+
+  if (sandbox.failed) {
+    // Fail-open: surface degraded state, keep the underlying ack/veto status.
+    return {
+      ...baseAck,
+      status: baseAck.status,
+      degraded: true,
+      reason: baseAck.reason
+        ? `${baseAck.reason}; lich-sandbox-${sandbox.reason}`
+        : `lich-sandbox-${sandbox.reason}`,
+      derived_events: derived,
+    };
+  }
+
+  return {
+    ...baseAck,
+    derived_events: derived,
+  };
+}
 
 function scanToolSchema(event: EnchantedEvent): PluginAck {
   const rawSchema = (event.payload as { tool_schema?: unknown }).tool_schema;
