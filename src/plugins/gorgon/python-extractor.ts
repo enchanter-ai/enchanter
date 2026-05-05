@@ -15,6 +15,23 @@ export interface PythonDef {
 }
 
 /**
+ * Optional resolver: maps a dotted Python module name to a filesystem path
+ * (relative to the project root). When supplied, extractPythonImports
+ * substitutes resolver hits for the verbatim module name in its output —
+ * giving downstream graph consumers actual file targets instead of import
+ * strings. See `pyproject-resolver.ts` for the production implementation.
+ *
+ * Returning `null` means "not in this project" — the verbatim module name
+ * is preserved so callers can still distinguish (e.g.) third-party imports.
+ */
+export type PythonModuleResolver = (moduleName: string) => string | null;
+
+export interface ExtractPythonImportsOptions {
+  /** When provided, resolved module → file paths replace verbatim modules. */
+  resolver?: PythonModuleResolver;
+}
+
+/**
  * extractPythonImports — returns the imported module names from a Python
  * source string.
  *
@@ -36,8 +53,17 @@ export interface PythonDef {
  *
  * Comments-only and string-only lines are ignored by the line-anchored
  * regex (a `#` before `import` makes the line not start with import).
+ *
+ * If `options.resolver` is supplied, each module name is passed through it.
+ * A non-null return replaces the module name with that path (typical: a
+ * project-relative `.py` filename); a null return preserves the verbatim
+ * module name (typical: stdlib / third-party). Resolver-less callers behave
+ * exactly as before this option existed — backwards compatible.
  */
-export function extractPythonImports(source: string): string[] {
+export function extractPythonImports(
+  source: string,
+  options?: ExtractPythonImportsOptions,
+): string[] {
   const out: string[] = [];
 
   // Strip leading whitespace, then either a `from X import …` or `import X[, Y]…`
@@ -57,7 +83,19 @@ export function extractPythonImports(source: string): string[] {
     }
   }
 
-  return out;
+  const resolver = options?.resolver;
+  if (!resolver) return out;
+
+  return out.map((name) => {
+    try {
+      const resolved = resolver(name);
+      return resolved ?? name;
+    } catch {
+      // Resolver throws → treat as miss; never break extraction. Gorgon is
+      // advisory and must fail-open per the adapter contract.
+      return name;
+    }
+  });
 }
 
 /**

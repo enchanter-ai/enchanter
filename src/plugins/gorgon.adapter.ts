@@ -20,14 +20,31 @@ import {
   extractPythonImports,
   extractPythonDefs,
   type PythonDef,
+  type PythonModuleResolver,
 } from './gorgon/python-extractor.js';
+import {
+  loadPyprojectSync,
+  createResolver,
+  type PyprojectMetadata,
+} from './gorgon/pyproject-resolver.js';
 
 export { tarjanScc } from './gorgon/tarjan.js';
 export {
   extractPythonImports,
   extractPythonDefs,
   type PythonDef,
+  type PythonModuleResolver,
 } from './gorgon/python-extractor.js';
+export {
+  loadPyproject,
+  loadPyprojectSync,
+  parsePyprojectSource,
+  resolveModule,
+  createResolver,
+  type PyprojectMetadata,
+  type FileSystemView,
+  type ModuleResolver,
+} from './gorgon/pyproject-resolver.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,12 +163,18 @@ interface GorgonState {
   graph: ImportGraph | null;
   dirtyPaths: Set<string>;
   hotspot: HotspotState | null;
+  /** Loaded pyproject metadata, when configureGorgon supplied a path. */
+  pyprojectMeta: PyprojectMetadata | null;
+  /** Cached Python module resolver bound to pyprojectMeta. */
+  pythonResolver: PythonModuleResolver | null;
 }
 
 const STATE: GorgonState = {
   graph: null,
   dirtyPaths: new Set(),
   hotspot: null,
+  pyprojectMeta: null,
+  pythonResolver: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -164,13 +187,24 @@ export interface GorgonConfig {
   dampingFactor?: number;
   maxIterations?: number;
   tolerance?: number;
+  /**
+   * Absolute path to a `pyproject.toml`. When provided, Python imports
+   * extracted via setSourceMap are resolved to project-relative file paths
+   * (e.g. `from foo.bar import baz` → `src/myproject/foo/bar.py`) — improving
+   * Tarjan SCC accuracy for dotted-module dependency graphs. Missing file or
+   * invalid TOML is tolerated: the adapter falls back to verbatim module names.
+   */
+  pyprojectPath?: string;
 }
 
-const CONFIG: Required<GorgonConfig> = {
+const CONFIG: Required<Omit<GorgonConfig, 'pyprojectPath'>> & {
+  pyprojectPath: string | null;
+} = {
   topN: 10,           // [author judgment] ten hotspots; enough signal, not noise
   dampingFactor: 0.85,
   maxIterations: 50,
   tolerance: 1e-6,
+  pyprojectPath: null,
 };
 
 export function configureGorgon(cfg: GorgonConfig): void {
@@ -178,6 +212,23 @@ export function configureGorgon(cfg: GorgonConfig): void {
   if (cfg.dampingFactor !== undefined) CONFIG.dampingFactor = cfg.dampingFactor;
   if (cfg.maxIterations !== undefined) CONFIG.maxIterations = cfg.maxIterations;
   if (cfg.tolerance !== undefined) CONFIG.tolerance = cfg.tolerance;
+  if (cfg.pyprojectPath !== undefined) {
+    CONFIG.pyprojectPath = cfg.pyprojectPath;
+    // Synchronous load so the resolver is available immediately after configure
+    // returns — setSourceMap is sync, and a deferred resolver would race it.
+    // loadPyprojectSync is fail-open: missing or invalid file yields empty
+    // metadata, which makes the resolver a no-op (verbatim module names).
+    try {
+      const meta = loadPyprojectSync(cfg.pyprojectPath);
+      STATE.pyprojectMeta = meta;
+      STATE.pythonResolver = createResolver(meta);
+    } catch {
+      // Defense-in-depth — loadPyprojectSync already swallows; this catch
+      // ensures configure never propagates an exception.
+      STATE.pyprojectMeta = null;
+      STATE.pythonResolver = null;
+    }
+  }
 }
 
 /** Supply the import graph before the cross-session phase runs. */
@@ -198,16 +249,19 @@ export function getCurrentScores(): Map<string, number> | null {
  * are passed through unchanged (the caller is expected to supply edges for
  * those out-of-band via setGraph or to extend this surface in v0.3.2).
  *
- * [author judgment] This is a thin adapter-level convenience, not a build
- * system. It does NOT resolve dotted module names to filesystem paths —
- * the import target string is recorded verbatim. Resolution against
- * pyproject.toml package roots is deferred per the design doc.
+ * When `configureGorgon({ pyprojectPath })` has been called, dotted Python
+ * module names are resolved to project-relative file paths via the loaded
+ * pyproject metadata — improving Tarjan SCC accuracy because edges now point
+ * to actual graph nodes rather than to import strings that don't match any
+ * file. Without a configured resolver, behaviour matches v0.3.1 exactly:
+ * verbatim module names recorded as edge targets.
  */
 export function setSourceMap(sources: Map<string, string>): void {
   const graph: ImportGraph = new Map();
+  const resolver = STATE.pythonResolver ?? undefined;
   for (const [file, source] of sources) {
     if (file.endsWith('.py')) {
-      graph.set(file, extractPythonImports(source));
+      graph.set(file, extractPythonImports(source, resolver ? { resolver } : undefined));
     } else {
       // No in-adapter extractor for other languages yet (v0.3.2). Record
       // the file as a node with no out-edges so it still appears in the
