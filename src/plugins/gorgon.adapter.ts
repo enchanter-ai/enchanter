@@ -15,6 +15,19 @@
 import type { PluginAdapter } from './plugin-contract.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
 import type { RequestContext } from '../orchestration/request-context.js';
+import { tarjanScc } from './gorgon/tarjan.js';
+import {
+  extractPythonImports,
+  extractPythonDefs,
+  type PythonDef,
+} from './gorgon/python-extractor.js';
+
+export { tarjanScc } from './gorgon/tarjan.js';
+export {
+  extractPythonImports,
+  extractPythonDefs,
+  type PythonDef,
+} from './gorgon/python-extractor.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -179,6 +192,32 @@ export function getCurrentScores(): Map<string, number> | null {
   return computePageRank(STATE.graph, CONFIG);
 }
 
+/**
+ * setSourceMap — build (or augment) the import graph from a {file → source}
+ * map. `.py` files route through the Python extractor; other extensions
+ * are passed through unchanged (the caller is expected to supply edges for
+ * those out-of-band via setGraph or to extend this surface in v0.3.2).
+ *
+ * [author judgment] This is a thin adapter-level convenience, not a build
+ * system. It does NOT resolve dotted module names to filesystem paths —
+ * the import target string is recorded verbatim. Resolution against
+ * pyproject.toml package roots is deferred per the design doc.
+ */
+export function setSourceMap(sources: Map<string, string>): void {
+  const graph: ImportGraph = new Map();
+  for (const [file, source] of sources) {
+    if (file.endsWith('.py')) {
+      graph.set(file, extractPythonImports(source));
+    } else {
+      // No in-adapter extractor for other languages yet (v0.3.2). Record
+      // the file as a node with no out-edges so it still appears in the
+      // graph; callers can layer edges via setGraph.
+      graph.set(file, []);
+    }
+  }
+  setGraph(graph);
+}
+
 // ---------------------------------------------------------------------------
 // Phase handlers
 // ---------------------------------------------------------------------------
@@ -189,6 +228,12 @@ function handleCrossSession(event: EnchantedEvent, _ctx: RequestContext): Plugin
   }
 
   const scores = computePageRank(STATE.graph, CONFIG);
+
+  // G1 Tarjan SCC: detect cycles in the same graph PageRank just walked.
+  // [author judgment] Only emit SCCs of size > 1 — every node is trivially
+  // its own SCC, so size-1 components are noise for the cycle-detection use case.
+  const allScc = tarjanScc(STATE.graph);
+  const cycles: string[][] = allScc.filter((c) => c.length > 1);
 
   // Build ranked list descending by score.
   const sorted: RankedNode[] = Array.from(scores.entries())
@@ -231,6 +276,7 @@ function handleCrossSession(event: EnchantedEvent, _ctx: RequestContext): Plugin
     payload: {
       file_count: scores.size,
       top_hotspots: topN.map((n) => ({ file: n.file, score: n.score, rank: n.rank })),
+      cycles,
     },
   });
 
