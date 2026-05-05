@@ -2,6 +2,45 @@
 
 All notable changes to Enchanter are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-05
+
+Major release — full v0.3 roadmap landed across three sub-iterations (0.3.0 / 0.3.1 / 0.3.2). Test count: 144 → 270 / 7 todo / 0 fail across 31 files. Every new feature is default-off behind a config flag for back-compat.
+
+### Added — v0.3.0 (foundation)
+- **OAuth replay defense** (`src/oauth/replay-store.ts`, `src/oauth/nonce.ts`) — nonce + RFC 3339 timestamp ride request alongside PKCE state. `consumeReplayDefense` validates issuance, replay, and freshness. `InMemoryReplayStore` (FIFO at 10k entries) and `PersistentReplayStore` (JSONL append-only, restart-survival, corrupt-tail tolerant).
+- **JSONL event bridge** (`src/observability/bridge.ts`) — explicit producer-side bridge from the in-process bus to a configurable sink. `StdoutSink`, `FileSink` (append-only), `TcpSink` (capped exp-backoff + 200-line buffer). Closes the implicit-protocol gap between the runtime and the Rust inspector.
+- **Wire schema** (`docs/event-schema.md`) — canonical JSONL contract: UTF-8, ≤ 1 MiB / line, type-discriminated, well-typed variants for `runtime.metrics` / `tool.call` / `hydra.veto` / `pech.ledger` / `task.updated` / `code.modified`, tolerant `GenericPayload` for all others. Severity ladder + phase enum match the inspector's Rust ground truth.
+- **File-backed pech ledger** (`src/plugins/pech/ledger-store.ts`) — opt-in JSONL append + replay-on-configure, parent-dir mkdir, `degraded:true` ack on write failure (never blocks the hot path).
+- **Rust ratatui terminal cockpit** (`inspector/`) — single `enchanter` binary, 10 live views, reads JSONL from stdin / file / TCP socket. See `inspector/CHANGELOG.md` for the inspector's own version log.
+
+### Added — v0.3.1 (security + algorithm upgrades)
+- **TLS cert pinning** (`src/transport/tls-pin.ts`) — `computeCertFingerprint` (SHA-256 over leaf cert DER, hex), `InMemoryTlsPinStore` and `PersistentTlsPinStore`, `verifyTlsPin` with TOFU and PINNED policies. Wired into `StreamableHttpTransport` via a custom undici `Agent` connector — verification fires before any request bytes go out.
+- **Full trust-pin** (`src/registry/trust-pin.ts`) — `computeTrustDigest` over canonical-JSON of `TrustPinInputs` (cmd / args / url / schemaDigests / binaryDigest / envAllowlist), `enforceTrustPin` publishes `hydra.trust-pin.mismatch` on `TrustPinMismatchError`, `approveTrustPinUpdate` for explicit human-in-the-loop rotation. Persistent JSONL store mirrors the OAuth replay pattern.
+- **Lich M5 sandboxed review** (`src/plugins/lich/sandbox.ts` + `sandbox-worker.mjs`) — `runSandboxedReview(code, options)` forks a worker via IPC with stripped env, wall-clock budget, `--max-old-space-size`. Returns `SandboxResult` (never throws); reasons: `timeout / worker-error / spawn-error / bad-response`. Adapter wires it into post-response behind `m5_sandbox: false` default; preserves M1 verdict; sets `degraded:true` on failure.
+- **Djinn D2 HMM drift detection** (`src/plugins/djinn/hmm.ts`) — 3-state HMM (ON_TASK / SIDEQUEST / LOST). Transition matrix tuned so SIDEQUEST is the gateway state and LOST requires sustained drift; emissions tuned so the design's "argmax SIDEQUEST under sustained low" holds. Forward-algorithm posteriors. Gated on `d2_hmm: false` default; `clearAnchor()` also clears HMM state.
+- **Gorgon Tarjan SCC + Python AST** (`src/plugins/gorgon/tarjan.ts` + `python-extractor.ts`) — iterative Tarjan returns SCCs in topological order, surfaced via `cycles: string[][]` in the existing snapshot payload (filtered to size > 1). Python regex extractor handles `from X import`, `import X`, `import X.Y`, `def`, `async def`, `class`. Routed via `setSourceMap` for `.py` files; non-Python extraction unchanged.
+
+### Added — v0.3.2 (workspace + wire-ups)
+- **`@enchanter-ai/plugin-*` workspace packages** (`packages/`) — npm workspaces over the existing `src/plugins/` source. 10 publish-ready packages each with their own `package.json` / `tsconfig.json` / `README.md` / `LICENSE`. `plugin-pech` is the reference implementation (full re-export); the other nine are scaffolded thin re-export shells. `npm pack --dry-run` succeeds for all 10. Not yet on the npm registry — release ceremony deferred to v0.4.
+- **Orchestrator → trust-pin enforcement** (`src/orchestration/lifecycle.ts`, `src/client/mcp-client.ts`) — trust-gate phase invokes `enforceTrustPin` against the live request inputs; `TrustPinMismatchError` is converted to `SecurityVetoError(plugin: 'trust-pin')` so it rides the existing veto plumbing. Default-off: pass `trustPinStore` to `McpClient` to enable. v0.3.2 populates `args / url / schemaDigests`; `cmd / binaryDigest / envAllowlist` deferred to v0.4.
+- **`ENCHANTER_BRIDGE` env switch** (`scripts/run.ts`, `src/observability/bridge-config.ts`) — supervisor reads `ENCHANTER_BRIDGE` and constructs the matching sink. Accepted forms: `stdout`, `tcp://host:port`, `file:./path`, `off` (default). On stdout sink: child stdout re-routed to stderr to keep the JSONL wire uncorrupted.
+- **Lich M5 tool-call confirmation** (`src/plugins/lich/sandbox.ts::runSandboxedToolCall`) — second sandbox variant that re-runs a tool call (currently against a deterministic mock-transport projection) and structurally diffs the result against the original response. Diff format: `{ matches, differences: [{ path, original, replayed }] }` with order-insensitive multiset comparison for arrays of primitives. Gated on `m5_tool_confirm: false`; sets `degraded:true` on sandbox failure. Real-MCP-server replay deferred to v0.4.
+
+### Changed
+- README — top-level "What's in the box" table now reflects v0.3.x. Stale "v0.3 roadmap" section replaced by "What shipped in v0.3" + "v0.4 roadmap". Hero image points at the Rust cockpit, not the retired SVG.
+- IMPLEMENTATION_SUMMARY.md is no longer the sole source of v0.3 status — see this changelog and the README's roadmap section.
+
+### Removed
+- `scripts/inspect.ts` — TS CLI inspector. Replaced by the Rust binary.
+- `src/observability/dashboard-server.ts` — TS dashboard server. Replaced by the JSONL bridge feeding the Rust inspector.
+- `src/observability/cli-renderer.ts` — TS CLI renderer.
+- `vscode-extension/` — VS Code extension that wrapped the TS inspector. Terminal-first per the inspector mantra: "Terminal is the cockpit. Web/Electron is the studio."
+
+### Security
+- TLS cert pinning closes FM 6 (server spoofing) for HTTPS MCP servers.
+- Trust-pin enforcement closes FM 10 (full server identity) at the trust-gate phase.
+- OAuth replay defense closes the residual replay window in the existing PKCE flow.
+
 ## [0.2.2] — 2026-04-29
 
 ### Added

@@ -13,7 +13,7 @@
 
 Enchanter is a TypeScript SDK for building agentic AI applications that speak [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It wraps every outbound tool call in a 7-phase orchestrator lifecycle, runs it through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow, and more) observe, modify, or block before the request leaves your process.
 
-**v0.2.2 — verified live against `@modelcontextprotocol/server-filesystem`.** 144 tests / 7 todo / 0 fail. 14/14 stress scenarios pass. Observability ships as a Rust terminal cockpit ([`inspector/`](inspector/)) — htop / btop / k9s for an AI agent runtime — that consumes the runtime's JSONL event stream over stdin, file, or socket.
+**v0.3.2 — full-stack agent SDK with shipped Rust observability surface.** 270 tests / 7 todo / 0 fail. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or TCP socket. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`.
 
 ## Install
 
@@ -54,7 +54,7 @@ const result = await client.callTool('read_file', { path: 'config.txt' });
 // pech appends a ledger entry per call
 ```
 
-## What's in the box (v0.2)
+## What's in the box (v0.3.2)
 
 | Subsystem | Status |
 |---|---|
@@ -63,11 +63,17 @@ const result = await client.callTool('read_file', { path: 'config.txt' });
 | stdio transport (newline-delimited UTF-8 JSON-RPC 2.0, 8MB body cap) | ✓ |
 | Streamable HTTP transport (POST + GET, exp-backoff reconnect, resume disabled by default) | ✓ |
 | OAuth 2.1 + S256 PKCE + RFC 8707 audience binding + SSRF guard | ✓ |
+| **OAuth replay defense** — nonce + freshness store, in-memory + JSONL-persistent | ✓ v0.3 |
+| **TLS cert pinning** — TOFU + PINNED policies, hooked into the streaming HTTP transport | ✓ v0.3.1 |
+| **Full trust-pin** — SHA-256 over (cmd + args + url + schemaDigests), enforced in trust-gate | ✓ v0.3.2 |
 | Namespace registry with SHA-256 schema-digest pin (MCPoison defense) | ✓ |
 | Tool name collision rejection | ✓ |
-| 10 plugin adapters (8 with v0.2 algorithms, 2 v0.3-pending) | ✓ |
+| **JSONL event bridge** — runtime → inspector wire contract with stdout / file / TCP sinks | ✓ v0.3 |
+| **Rust terminal cockpit** ([`inspector/`](inspector/)) — 10 live views over the JSONL stream | ✓ v0.3 |
+| 10 plugin adapters (now all on v0.3 algorithms — pech file-backed ledger, lich M5 sandbox + tool-call confirm, djinn D2 HMM, gorgon Tarjan + Python AST) | ✓ v0.3.x |
+| Independently installable `@enchanter-ai/plugin-*` packages (workspace) | ✓ v0.3.2 |
 | Live integration tested against `@modelcontextprotocol/server-filesystem` | ✓ |
-| 6 of 10 documented MCP failure modes mitigated | ✓ |
+| 9 of 10 documented MCP failure modes mitigated | ✓ |
 
 ## The 10 plugins
 
@@ -121,17 +127,25 @@ Full architectural spec: produced by [Wixie](https://github.com/enchanter-ai/wix
 
 See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for the per-file inventory + v0.3 follow-up plan.
 
-## v0.3 roadmap
+## What shipped in v0.3
 
-The 5 highest-risk security follow-ups (in order):
+The original v0.3 roadmap is fully landed. Sub-iterations:
 
-1. **OAuth replay defense** — nonce + freshness store. Currently audience-binding only.
-2. **Server spoofing (FM 6)** — TLS cert pinning + Authorization-header response-origin check.
-3. **Full trust-pin (FM 10)** — SHA-256 over (cmd + args + binary digest + env + URL + schema).
-4. **Lich M5 sandbox** — currently M1 static + M6 EMA only.
-5. **Djinn D2 HMM drift** — currently D1 LCS only.
+- **v0.3.0** — OAuth replay defense (nonce + freshness store, persistent JSONL), runtime → inspector JSONL bridge with explicit wire schema, file-backed pech ledger.
+- **v0.3.1** — TLS cert pinning (FM 6), full trust-pin store (FM 10), lich M5 sandboxed code review, djinn D2 HMM drift detection (3-state ON_TASK / SIDEQUEST / LOST), gorgon Tarjan SCC + Python AST extractor.
+- **v0.3.2** — `@enchanter-ai/plugin-*` workspace packages, orchestrator → trust-pin enforcement, `ENCHANTER_BRIDGE` env-switch supervisor wire-up, lich M5 tool-call confirmation variant.
 
-Plus: file-backed pech ledger, gorgon Tarjan SCC + Python AST extraction, npm-publishable `@enchanter-ai/plugin-*` packages.
+Test count: 144 → 270 / 7 todo / 0 fail across 31 files. All v0.3 features are default-off behind config flags for back-compat — existing v0.2 callers see unchanged behavior.
+
+## v0.4 roadmap
+
+Carry-overs and new fronts:
+
+1. **Real-MCP-server replay** for lich M5 tool-call confirmation. Currently the sandbox replays against a deterministic mock-transport projection; v0.4 re-spawns the originating server and diffs against a live result. Includes a per-(schema_digest, args_digest) LRU cache.
+2. **Trust-pin digest expansion** — currently populates `args / url / schemaDigests`. v0.4 threads `cmd / binaryDigest / envAllowlist` through `McpClient` via a new `transportDescriptor` constructor field.
+3. **Djinn D2 HMM persistence** — per-session HMM state is in-memory only; persist alongside the existing anchor store.
+4. **Gorgon dotted-module resolution** — Python imports record module names verbatim; resolve against `pyproject.toml` for cycle-detection accuracy.
+5. **Plugin-package publish to the npm registry** — `npm pack --dry-run` succeeds for all 10 packages today; the actual `npm publish` push is gated on a release ceremony decision.
 
 ## Contributing
 
