@@ -14,6 +14,7 @@ import { createRequestContext, type BudgetTier } from '../orchestration/request-
 import { InProcessBus } from '../bus/pubsub.js';
 import type { PluginAdapter } from '../plugins/plugin-contract.js';
 import { enforceTrustPin, type TrustPinInputs, type TrustPinStore } from '../registry/trust-pin.js';
+import type { TransportDescriptor } from '../transport/transport-descriptor.js';
 
 export interface Transport {
   send(msg: JsonRpcMessage): Promise<void>;
@@ -51,8 +52,58 @@ export interface McpClientConfig {
    * Optional URL for remote (Streamable-HTTP) MCP servers. Folded into the
    * trust-pin digest when present; absent for stdio servers. Optional even
    * when `trustPinStore` is set — stdio callers leave it undefined.
+   *
+   * Prefer supplying `transportDescriptor` (kind: 'http') instead — when both
+   * are present the descriptor wins and `serverUrl` is ignored.
    */
   readonly serverUrl?: string;
+  /**
+   * v0.4 follow-up #2 — transport-launch-time inputs that fill the rest of
+   * the trust-pin digest (cmd, binaryDigest, envAllowlist for stdio; url
+   * for http). Optional for back-compat: when absent, the trust-gate hook
+   * falls back to the v0.3.2 behavior (only args, optional serverUrl, and
+   * schemaDigests participate). Build via `describeStdio()` / `describeHttp()`
+   * from `src/transport/transport-descriptor.ts`.
+   */
+  readonly transportDescriptor?: TransportDescriptor;
+}
+
+/**
+ * Compose the `TrustPinInputs` for the trust-gate hook. Pulls cmd /
+ * binaryDigest / envAllowlist (stdio) or url (http) from the descriptor
+ * when present, and folds in per-call args + schema digests. Missing
+ * descriptor fields are omitted entirely so the digest stays stable per
+ * trust-pin canonicalization rules.
+ *
+ * Exported for the v0.4 integration test; not part of the public API.
+ */
+export function buildTrustPinInputs(args: {
+  descriptor?: TransportDescriptor;
+  fallbackUrl?: string;
+  callArgs: readonly string[];
+  schemaDigests: readonly string[];
+}): TrustPinInputs {
+  const inputs: TrustPinInputs = {
+    args: [...args.callArgs],
+    schemaDigests: args.schemaDigests,
+  };
+  if (args.descriptor) {
+    if (args.descriptor.kind === 'stdio') {
+      return {
+        ...inputs,
+        cmd: args.descriptor.cmd,
+        ...(args.descriptor.binaryDigest !== undefined ? { binaryDigest: args.descriptor.binaryDigest } : {}),
+        envAllowlist: args.descriptor.envAllowlist,
+      };
+    }
+    // http
+    return { ...inputs, url: args.descriptor.url };
+  }
+  // No descriptor — preserve v0.3.2 behavior.
+  if (args.fallbackUrl !== undefined) {
+    return { ...inputs, url: args.fallbackUrl };
+  }
+  return inputs;
 }
 
 export class McpClient {
@@ -64,6 +115,7 @@ export class McpClient {
   private readonly budgetTier: BudgetTier;
   private readonly trustPinStore?: TrustPinStore;
   private readonly serverUrl?: string;
+  private readonly transportDescriptor?: TransportDescriptor;
   private nextRequestId = 1;
   private readonly pending = new Map<
     number | string,
@@ -78,6 +130,7 @@ export class McpClient {
     this.budgetTier = config.budgetTier ?? 'HIGH';
     this.trustPinStore = config.trustPinStore;
     this.serverUrl = config.serverUrl;
+    this.transportDescriptor = config.transportDescriptor;
     this.registry = new NamespaceRegistry();
     this.bus = config.bus ?? new InProcessBus();
 
@@ -167,23 +220,27 @@ export class McpClient {
     // Build the trust-gate hook only when a store is configured (back-compat:
     // undefined trustPinStore → orchestrator skips the hook).
     const trustGateHook = this.trustPinStore
-      ? async (): Promise<void> => {
-          // Inputs available at trust-gate from the live request:
-          //   - args (canonicalized into the digest as a JSON-stringified array)
-          //   - url (when set on the client; absent for stdio)
-          //   - schemaDigests (sorted set across this server's tools)
-          // TODO(v0.3.3): cmd, binaryDigest, envAllowlist are stdio-launch-time
-          // inputs not currently threaded through McpClient. Extend the
-          // constructor with a `transportDescriptor: { cmd, args, env, binaryDigest }`
-          // so the digest covers the full server identity, not just per-call args.
-          const inputs: TrustPinInputs = {
-            args: [ident.bare_name, JSON.stringify(args)],
-            ...(this.serverUrl !== undefined ? { url: this.serverUrl } : {}),
+      ? async (hookCtx: { ctx: typeof ctx; transportDescriptor?: TransportDescriptor }): Promise<void> => {
+          // v0.4 follow-up #2: when `transportDescriptor` is supplied, the
+          // launch-time fields (cmd, binaryDigest, envAllowlist for stdio;
+          // url for http) join the digest alongside the per-call `args` and
+          // the registry-derived `schemaDigests`. Without a descriptor we
+          // fall back to v0.3.2 behavior (args + optional serverUrl + schemas).
+          //
+          // The per-call `args` field intentionally remains
+          // [bare_name, JSON.stringify(args)] — that's what enforceTrustPin
+          // already pins against and existing tests rely on it. Launch-time
+          // `args` from the descriptor would conflict; the digest's purpose
+          // is server-identity, and the per-call args are the live request.
+          const inputs = buildTrustPinInputs({
+            descriptor: hookCtx.transportDescriptor,
+            fallbackUrl: this.serverUrl,
+            callArgs: [ident.bare_name, JSON.stringify(args)],
             schemaDigests: this.registry.schemaDigestsFor(this.serverId),
-          };
+          });
           await enforceTrustPin(this.trustPinStore!, this.serverId, inputs, this.bus, {
-            correlation_id: ctx.correlation_id,
-            session_id: ctx.session_id,
+            correlation_id: hookCtx.ctx.correlation_id,
+            session_id: hookCtx.ctx.session_id,
             phase: 'trust-gate',
           });
         }
@@ -216,7 +273,11 @@ export class McpClient {
         });
         return resp.result;
       },
-      trustGateHook ? { trustGateHook } : {},
+      trustGateHook
+        ? this.transportDescriptor
+          ? { trustGateHook, transportDescriptor: this.transportDescriptor }
+          : { trustGateHook }
+        : {},
     );
   }
 

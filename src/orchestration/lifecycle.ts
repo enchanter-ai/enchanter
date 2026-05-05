@@ -10,6 +10,7 @@ import type { PluginAdapter, PluginRegistry } from '../plugins/plugin-contract.j
 import type { Bus } from '../bus/pubsub.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
 import { TrustPinMismatchError } from '../registry/trust-pin.js';
+import type { TransportDescriptor } from '../transport/transport-descriptor.js';
 import {
   DEFAULT_PHASE_TIMEOUTS_MS,
   LIFECYCLE_PHASES,
@@ -56,13 +57,24 @@ export interface DispatchHandler {
  * (FM 10 MCPoison closure). On TrustPinMismatchError, the orchestrator
  * converts it to a SecurityVetoError so the failure surfaces through the
  * existing required-plugin veto plumbing.
+ *
+ * The optional `transportDescriptor` is passed through from `RunOptions` so
+ * the hook can fold launch-time fields (cmd, binaryDigest, envAllowlist for
+ * stdio; url for http) into the TrustPinInputs without the caller threading
+ * a closure capture through every dispatch path. (v0.4 follow-up #2)
  */
+export interface TrustGateHookContext {
+  readonly ctx: RequestContext;
+  readonly transportDescriptor?: TransportDescriptor;
+}
+
 export interface TrustGateHook {
-  (ctx: RequestContext): Promise<void> | void;
+  (input: TrustGateHookContext): Promise<void> | void;
 }
 
 export interface RunOptions {
   readonly trustGateHook?: TrustGateHook;
+  readonly transportDescriptor?: TransportDescriptor;
 }
 
 export class Orchestrator {
@@ -131,7 +143,7 @@ export class Orchestrator {
       // SecurityVetoError so the existing veto plumbing handles short-circuit.
       if (phase === 'trust-gate' && options.trustGateHook) {
         try {
-          await options.trustGateHook(ctx);
+          await options.trustGateHook({ ctx, transportDescriptor: options.transportDescriptor });
         } catch (err) {
           if (err instanceof TrustPinMismatchError) {
             throw new SecurityVetoError('trust-pin', phase, err.message);
