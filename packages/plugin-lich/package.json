@@ -1,0 +1,48 @@
+{
+  "name": "@enchanter-ai/plugin-lich",
+  "version": "0.3.0",
+  "description": "Code review with sandboxed confirmation + Bayesian preference — Lich adapter for Enchanter",
+  "keywords": [
+    "enchanter",
+    "mcp",
+    "plugin",
+    "code-review",
+    "sandbox"
+  ],
+  "homepage": "https://github.com/enchanter-ai/enchanter#readme",
+  "bugs": {
+    "url": "https://github.com/enchanter-ai/enchanter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/enchanter-ai/enchanter.git",
+    "directory": "client/enchanter/packages/plugin-lich"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "enchanter": ">=0.2.0"
+  }
+}

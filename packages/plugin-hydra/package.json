@@ -1,0 +1,49 @@
+{
+  "name": "@enchanter-ai/plugin-hydra",
+  "version": "0.3.0",
+  "description": "Real-time security interception with 1844 CVE-mapped patterns — Hydra adapter for Enchanter",
+  "keywords": [
+    "enchanter",
+    "mcp",
+    "plugin",
+    "security",
+    "cve",
+    "secret-masking"
+  ],
+  "homepage": "https://github.com/enchanter-ai/enchanter#readme",
+  "bugs": {
+    "url": "https://github.com/enchanter-ai/enchanter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/enchanter-ai/enchanter.git",
+    "directory": "client/enchanter/packages/plugin-hydra"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "enchanter": ">=0.2.0"
+  }
+}
