@@ -135,12 +135,16 @@ export function resetDjinnStore(): void {
 }
 
 /** Internal: get-or-create the per-session HMM. Hydrates from the store on
-    first access; subsequent updates persist back. */
+    first access; subsequent updates persist back.
+    A schema-version-mismatched snapshot is treated as a cache miss: the store
+    has already warned + dropped it, and `IntentHmm.fromSnapshot` returns null
+    for shape-incompatible snapshots, so we build a fresh HMM in either case. */
 function getOrCreateHmm(session_id: string): IntentHmm {
   let h = HMMS.get(session_id);
   if (!h) {
     const snap = _hmmStore.load(session_id);
-    h = snap ? IntentHmm.fromSnapshot(snap) : new IntentHmm();
+    const hydrated = snap ? IntentHmm.fromSnapshot(snap) : null;
+    h = hydrated ?? new IntentHmm();
     HMMS.set(session_id, h);
   }
   return h;

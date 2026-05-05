@@ -16,7 +16,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { HmmStateSnapshot } from './hmm.js';
+import { HMM_STATE_VERSION, type HmmStateSnapshot } from './hmm.js';
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -39,7 +39,20 @@ export class InMemoryHmmStore implements HmmStore {
   protected readonly entries = new Map<string, HmmStateSnapshot>();
 
   load(sessionId: string): HmmStateSnapshot | undefined {
-    return this.entries.get(sessionId);
+    const snap = this.entries.get(sessionId);
+    if (!snap) return undefined;
+    // State-shape schema check (v0.5 #2). A snapshot that predates this
+    // field — or one written by a future release with a different state
+    // space — must trigger a hard reset rather than silently rehydrating
+    // against a mismatched model.
+    const stored = typeof snap.version === 'number' ? snap.version : 0;
+    if (stored !== HMM_STATE_VERSION) {
+      warnVersionMismatch(sessionId, stored);
+      // Drop the stale entry so subsequent loads don't re-warn.
+      this.entries.delete(sessionId);
+      return undefined;
+    }
+    return snap;
   }
 
   save(sessionId: string, snap: HmmStateSnapshot): void {
@@ -145,9 +158,30 @@ export class PersistentHmmStore extends InMemoryHmmStore {
 
 function isValidSnapshot(snap: unknown): snap is HmmStateSnapshot {
   if (!snap || typeof snap !== 'object') return false;
-  const s = snap as { posterior?: unknown; initialized?: unknown };
+  const s = snap as { posterior?: unknown; initialized?: unknown; version?: unknown };
   if (!Array.isArray(s.posterior) || s.posterior.length !== 3) return false;
   if (!s.posterior.every((x) => typeof x === 'number' && Number.isFinite(x))) return false;
   if (typeof s.initialized !== 'boolean') return false;
+  // `version` is optional at the structural level — pre-v0.5 records lack
+  // it. The schema-version gate runs in `load()`, not here, so that the
+  // replay loop still picks up the row (and the load path is the single
+  // place that warns + resets).
+  if (s.version !== undefined && typeof s.version !== 'number') return false;
   return true;
+}
+
+/**
+ * Operator-visible warning when a stored snapshot's schema version doesn't
+ * match the running code's `HMM_STATE_VERSION`. Format kept stable so
+ * log-greps survive future bumps. Tests assert the substring
+ * `schema version mismatch`.
+ */
+function warnVersionMismatch(sessionId: string, stored: number): void {
+  // No tracer is established in this codebase yet; console.warn matches the
+  // fail-soft posture of the rest of the file (best-effort logging only).
+  // eslint-disable-next-line no-console
+  console.warn(
+    `djinn hmm store: schema version mismatch for session=${sessionId} ` +
+      `(stored=${stored}, current=${HMM_STATE_VERSION}); resetting`,
+  );
 }

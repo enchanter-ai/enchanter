@@ -11,7 +11,11 @@ import {
   InMemoryHmmStore,
   PersistentHmmStore,
 } from '../../../src/plugins/djinn/hmm-store.js';
-import { IntentHmm, type HmmStateSnapshot } from '../../../src/plugins/djinn/hmm.js';
+import {
+  IntentHmm,
+  HMM_STATE_VERSION,
+  type HmmStateSnapshot,
+} from '../../../src/plugins/djinn/hmm.js';
 import {
   djinnAdapter,
   clearAnchor,
@@ -40,6 +44,7 @@ afterEach(() => {
 });
 
 const SAMPLE_SNAP: HmmStateSnapshot = {
+  version: HMM_STATE_VERSION,
   posterior: [0.7, 0.2, 0.1],
   initialized: true,
 };
@@ -70,7 +75,11 @@ describe('InMemoryHmmStore', () => {
   it('save() overwrites the prior snapshot', () => {
     const store = new InMemoryHmmStore();
     store.save('s1', SAMPLE_SNAP);
-    const next: HmmStateSnapshot = { posterior: [0.1, 0.4, 0.5], initialized: true };
+    const next: HmmStateSnapshot = {
+      version: HMM_STATE_VERSION,
+      posterior: [0.1, 0.4, 0.5],
+      initialized: true,
+    };
     store.save('s1', next);
     expect(store.load('s1')).toEqual(next);
   });
@@ -96,7 +105,11 @@ describe('PersistentHmmStore', () => {
     const path = join(tmpDir, 'hmm.jsonl');
     const a = new PersistentHmmStore(path);
     a.save('s1', SAMPLE_SNAP);
-    const next: HmmStateSnapshot = { posterior: [0.05, 0.25, 0.7], initialized: true };
+    const next: HmmStateSnapshot = {
+      version: HMM_STATE_VERSION,
+      posterior: [0.05, 0.25, 0.7],
+      initialized: true,
+    };
     a.save('s1', next);
 
     const b = new PersistentHmmStore(path);
@@ -163,10 +176,11 @@ describe('IntentHmm — serialize/fromSnapshot', () => {
 
     const snap = a.serialize();
     const b = IntentHmm.fromSnapshot(snap);
+    expect(b).not.toBeNull();
 
     // Same next observation should yield identical posterior on both.
     const stepA = a.update(0.05);
-    const stepB = b.update(0.05);
+    const stepB = b!.update(0.05);
     expect(stepB.state).toBe(stepA.state);
     expect(stepB.posterior.ON_TASK).toBeCloseTo(stepA.posterior.ON_TASK, 9);
     expect(stepB.posterior.SIDEQUEST).toBeCloseTo(stepA.posterior.SIDEQUEST, 9);

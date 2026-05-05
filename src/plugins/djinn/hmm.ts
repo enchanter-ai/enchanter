@@ -51,6 +51,27 @@ export interface HmmStep {
 }
 
 /**
+ * State-shape schema version for the persisted HMM snapshot. Bump this any
+ * time the *shape* of the dynamic state changes — i.e. the state set
+ * (`STATES`), observation buckets, or `posterior` length — so that older
+ * stored snapshots hard-reset rather than silently rehydrate against a
+ * mismatched current model. (v0.5 #2)
+ *
+ * Forward-compat protocol — when bumping:
+ *   1. Increment `HMM_STATE_VERSION` to N+1.
+ *   2. Update `DEFAULT_TRANSITIONS` / `DEFAULT_EMISSIONS` / `STATES` etc. to
+ *      the new shape.
+ *   3. Existing on-disk JSONL records with `version <= N` will be detected by
+ *      the load path and trigger a fresh build (with a warning).
+ *   4. Document the change in `docs/v0.5/djinn-versioning.md` (or the
+ *      release-specific note) including the wire-format delta.
+ *
+ * Snapshots WITHOUT a `version` field (pre-v0.5 records) are treated as
+ * version `0` and trigger a hard reset on load — they predate this protocol.
+ */
+export const HMM_STATE_VERSION = 1 as const;
+
+/**
  * Serializable snapshot of an `IntentHmm`'s forward state. The transition
  * matrix and emission table are NOT serialised — those live in code as
  * `HmmConfig` and may be tuned across releases. Persisting only the dynamic
@@ -58,13 +79,22 @@ export interface HmmStep {
  * yesterday's transition probabilities to disk.
  *
  * [author judgment] If a future release retunes `DEFAULT_TRANSITIONS` /
- * `DEFAULT_EMISSIONS`, a hydrated session continues with the new matrix from
- * the next observation onward. The posterior at restoration is treated as a
- * (possibly slightly stale) prior — drift dynamics correct themselves within
- * a few turns. This is preferable to versioning the matrix on disk and
- * refusing to hydrate sessions that span a config change.
+ * `DEFAULT_EMISSIONS` *without changing the state shape*, a hydrated session
+ * continues with the new matrix from the next observation onward. The
+ * posterior at restoration is treated as a (possibly slightly stale) prior —
+ * drift dynamics correct themselves within a few turns. This is preferable
+ * to versioning the matrix on disk and refusing to hydrate on every nudge.
+ *
+ * Shape changes (state-set growth, posterior-length change, observation
+ * bucket re-cut) are different — those bump `HMM_STATE_VERSION` and force a
+ * hard reset at load time. See the constant's docblock for the protocol.
  */
 export interface HmmStateSnapshot {
+  /**
+   * State-shape schema version. Must equal `HMM_STATE_VERSION` on load, else
+   * the snapshot is rejected and a fresh HMM is built.
+   */
+  readonly version: number;
   /** Forward probabilities, length 3, ordered by `STATES`. */
   readonly posterior: readonly [number, number, number];
   /** True once at least one observation has folded in. */
@@ -226,6 +256,7 @@ export class IntentHmm {
    */
   serialize(): HmmStateSnapshot {
     return {
+      version: HMM_STATE_VERSION,
       posterior: [this.alpha[0], this.alpha[1], this.alpha[2]],
       initialized: this.initialized,
     };
@@ -235,8 +266,24 @@ export class IntentHmm {
    * Re-hydrate an HMM from a snapshot, optionally overriding the config.
    * The snapshot's posterior becomes the new starting `alpha`; subsequent
    * `update()` calls apply the *current* transition matrix on top of it.
+   *
+   * Returns `null` when the snapshot is shape-incompatible with the current
+   * model — version mismatch (including pre-v0.5 snapshots that lack a
+   * `version` field, treated as v0) or `posterior.length` mismatch with the
+   * current state count. Callers must treat null as a cache miss and build
+   * a fresh HMM.
    */
-  static fromSnapshot(snap: HmmStateSnapshot, cfg: HmmConfig = DEFAULT_CONFIG): IntentHmm {
+  static fromSnapshot(
+    snap: HmmStateSnapshot,
+    cfg: HmmConfig = DEFAULT_CONFIG,
+  ): IntentHmm | null {
+    // A pre-v0.5 snapshot that pre-dates this field reads as `undefined`;
+    // coerce to 0 so the equality check below uniformly rejects it.
+    const snapVersion = typeof snap.version === 'number' ? snap.version : 0;
+    if (snapVersion !== HMM_STATE_VERSION) return null;
+    if (!Array.isArray(snap.posterior) || snap.posterior.length !== STATES.length) {
+      return null;
+    }
     const hmm = new IntentHmm(cfg);
     hmm.alpha = [snap.posterior[0]!, snap.posterior[1]!, snap.posterior[2]!];
     hmm.initialized = snap.initialized;
