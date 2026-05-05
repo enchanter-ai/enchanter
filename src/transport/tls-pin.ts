@@ -1,20 +1,26 @@
-/* enchanter/src/transport/tls-pin.ts — STUB for v0.3 follow-up #2
-   (FM 6 server spoofing). Defines the intended API; bodies throw until
-   v0.3.1 implementation. Design doc: docs/v0.3/tls-pinning.md.
+/* enchanter/src/transport/tls-pin.ts — implements v0.3.1 follow-up #2
+   (FM 6 server spoofing). Pin store keyed by URL origin; each entry stores
+   a SHA-256 over the leaf certificate's DER encoding (hex-lowercase) plus
+   metadata. On every TLS handshake the connection's leaf cert is hashed
+   and compared. Design doc: docs/v0.3/tls-pinning.md.
 
    Threat model: an attacker MITMing a streamable-HTTP MCP server presents
    a valid-but-attacker-controlled cert chain. PKI alone is insufficient
    because the trust anchor set is large and an attacker who compromises
-   any one CA wins. Pinning fixes the leaf or intermediate per-origin.
+   any one CA wins. Pinning fixes the leaf per-origin.
 
-   The pin store is keyed by URL origin (scheme + host + port). Each entry
-   stores a SHA-256 over the leaf certificate's DER encoding. On every
-   TLS handshake the connection's leaf cert is hashed and compared.
-
-   Two policies (final design pending):
+   Two policies:
      - TOFU (trust-on-first-use): first connect populates the pin; later
-       mismatches fail closed.
-     - PINNED (config-supplied): pins are seeded from config; no TOFU. */
+       mismatches fail closed. Default for v0.3.1.
+     - PINNED (config-supplied): pins are seeded from config; an unknown
+       origin throws TlsPinUnknownError (no implicit trust).
+
+   Persistence: PersistentTlsPinStore mirrors PersistentReplayStore — a
+   JSONL append-only log replayed on construction, corrupt-tail tolerant. */
+
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 
 /** A pin = SHA-256 over the DER-encoded leaf certificate, hex-lowercase. */
 export type CertFingerprint = string;
@@ -52,50 +58,141 @@ export class TlsPinMismatchError extends Error {
   }
 }
 
+export class TlsPinUnknownError extends Error {
+  constructor(public readonly origin: string) {
+    super(`TLS pin unknown for ${origin}: PINNED policy requires an operator-supplied pin`);
+    this.name = 'TlsPinUnknownError';
+  }
+}
+
 /**
  * Compute the SHA-256 fingerprint of a DER-encoded leaf certificate.
  * Returns hex-lowercase. Used by both TOFU populate and verify paths.
  */
-export function computeCertFingerprint(_certDer: Buffer): CertFingerprint {
-  // TODO(v0.3.1): implement via createHash('sha256').update(certDer).digest('hex')
-  throw new Error('TODO(v0.3.1): tls-pin.computeCertFingerprint not implemented');
+export function computeCertFingerprint(certDer: Buffer): CertFingerprint {
+  return createHash('sha256').update(certDer).digest('hex');
 }
 
 /**
  * Verify a connection's leaf cert against the pin store. On TOFU policy,
  * an unknown origin populates the pin and returns. On PINNED policy, an
- * unknown origin throws. On any policy, a fingerprint mismatch throws
- * TlsPinMismatchError.
+ * unknown origin throws TlsPinUnknownError. On any policy, a fingerprint
+ * mismatch throws TlsPinMismatchError.
  */
 export function verifyTlsPin(
-  _store: TlsPinStore,
-  _origin: string,
-  _certDer: Buffer,
-  _policy: 'tofu' | 'pinned',
+  store: TlsPinStore,
+  origin: string,
+  certDer: Buffer,
+  policy: 'tofu' | 'pinned',
 ): void {
-  // TODO(v0.3.1): implement
-  throw new Error('TODO(v0.3.1): tls-pin.verifyTlsPin not implemented');
+  const seen = computeCertFingerprint(certDer);
+  const existing = store.get(origin);
+
+  if (!existing) {
+    if (policy === 'pinned') {
+      throw new TlsPinUnknownError(origin);
+    }
+    // TOFU: populate the pin and proceed.
+    store.set({ origin, fingerprint: seen, pinnedAt: Date.now(), source: 'tofu' });
+    return;
+  }
+
+  if (existing.fingerprint !== seen) {
+    throw new TlsPinMismatchError(origin, existing.fingerprint, seen);
+  }
 }
 
-/**
- * In-memory pin store. v0.3.1 will add a JSONL-backed persistent variant
- * mirroring the replay-store pattern.
- */
+// ---------------------------------------------------------------------------
+// InMemoryTlsPinStore
+// ---------------------------------------------------------------------------
+
 export class InMemoryTlsPinStore implements TlsPinStore {
-  get(_origin: string): TlsPinEntry | undefined {
-    // TODO(v0.3.1): implement
-    throw new Error('TODO(v0.3.1): InMemoryTlsPinStore.get not implemented');
+  protected readonly entries = new Map<string, TlsPinEntry>();
+
+  // Override hooks for the persistent subclass — base class is no-op.
+  protected onSet(_entry: TlsPinEntry): void {
+    /* no-op for in-memory */
   }
-  set(_entry: TlsPinEntry): void {
-    // TODO(v0.3.1): implement
-    throw new Error('TODO(v0.3.1): InMemoryTlsPinStore.set not implemented');
+  protected onRemove(_origin: string): void {
+    /* no-op for in-memory */
   }
-  remove(_origin: string): void {
-    // TODO(v0.3.1): implement
-    throw new Error('TODO(v0.3.1): InMemoryTlsPinStore.remove not implemented');
+
+  get(origin: string): TlsPinEntry | undefined {
+    return this.entries.get(origin);
   }
+
+  set(entry: TlsPinEntry): void {
+    this.entries.set(entry.origin, entry);
+    this.onSet(entry);
+  }
+
+  remove(origin: string): void {
+    if (this.entries.delete(origin)) {
+      this.onRemove(origin);
+    }
+  }
+
   list(): readonly TlsPinEntry[] {
-    // TODO(v0.3.1): implement
-    throw new Error('TODO(v0.3.1): InMemoryTlsPinStore.list not implemented');
+    return [...this.entries.values()];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PersistentTlsPinStore — JSONL on disk for restart-survival
+// ---------------------------------------------------------------------------
+
+interface JsonlLine {
+  op: 'set' | 'remove';
+  origin: string;
+  /** Present on set lines; absent on remove. */
+  entry?: TlsPinEntry;
+}
+
+export class PersistentTlsPinStore extends InMemoryTlsPinStore {
+  private readonly path: string;
+
+  constructor(path: string) {
+    super();
+    this.path = path;
+    const dir = dirname(path);
+    if (dir && !existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    this.replayFromDisk();
+  }
+
+  protected override onSet(entry: TlsPinEntry): void {
+    const line: JsonlLine = { op: 'set', origin: entry.origin, entry };
+    appendFileSync(this.path, JSON.stringify(line) + '\n', { encoding: 'utf8' });
+  }
+
+  protected override onRemove(origin: string): void {
+    const line: JsonlLine = { op: 'remove', origin };
+    appendFileSync(this.path, JSON.stringify(line) + '\n', { encoding: 'utf8' });
+  }
+
+  private replayFromDisk(): void {
+    if (!existsSync(this.path)) return;
+    const raw = readFileSync(this.path, 'utf8');
+    if (!raw) return;
+
+    for (const rawLine of raw.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      let parsed: JsonlLine;
+      try {
+        parsed = JSON.parse(line) as JsonlLine;
+      } catch {
+        // Tolerate trailing/corrupt line at tail (e.g., crash mid-write).
+        continue;
+      }
+
+      if (parsed.op === 'set' && parsed.entry) {
+        // Direct map mutation — bypasses onSet to avoid re-appending during replay.
+        this.entries.set(parsed.entry.origin, parsed.entry);
+      } else if (parsed.op === 'remove') {
+        this.entries.delete(parsed.origin);
+      }
+    }
   }
 }

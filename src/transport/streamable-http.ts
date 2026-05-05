@@ -5,9 +5,16 @@
    phase_4 failure-mode 5 (unbounded resources — 8MB body cap) and
    failure-mode 8 (session hijacking — resume disabled by default). */
 
-import { request as undiciRequest, type Dispatcher } from 'undici';
+import { Agent, buildConnector, request as undiciRequest, type Dispatcher } from 'undici';
+import type { TLSSocket } from 'node:tls';
 import { parseJsonRpc, serializeJsonRpc, type JsonRpcMessage } from '../protocol/jsonrpc.js';
 import { BodyTooLargeError, PER_MESSAGE_BODY_MAX_BYTES } from './stdio.js';
+import {
+  TlsPinMismatchError,
+  TlsPinUnknownError,
+  verifyTlsPin,
+  type TlsPinStore,
+} from './tls-pin.js';
 
 // ---------------------------------------------------------------------------
 // Backoff constants — [author judgment]:
@@ -29,6 +36,13 @@ const ACCEPT_HEADER = 'application/json, text/event-stream';
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
+
+export class TlsPinTransportError extends Error {
+  constructor(public readonly origin: string, public readonly cause: Error) {
+    super(`TLS pin verification failed for ${origin}: ${cause.message}`);
+    this.name = 'TlsPinTransportError';
+  }
+}
 
 export class StreamableHttpResumeError extends Error {
   constructor() {
@@ -61,6 +75,29 @@ export interface StreamableHttpTransportOptions {
   allowResume?: boolean;
   /** Custom dispatcher (used by tests via undici MockAgent). */
   dispatcher?: Dispatcher;
+  /**
+   * Optional TLS pin store (FM 6 server-spoofing mitigation). When supplied
+   * AND `dispatcher` is NOT supplied, the transport builds a TLS-pinning
+   * Agent that hashes the leaf cert on every TLS handshake and runs
+   * verifyTlsPin() before any request bytes are sent.
+   *
+   * If `dispatcher` is also supplied, the explicit dispatcher wins (test
+   * MockAgent path); the pin store is ignored. This keeps the existing
+   * MockAgent-based tests working unchanged.
+   */
+  tlsPinStore?: TlsPinStore;
+  /** TLS pin policy. Defaults to 'tofu' when tlsPinStore is supplied. */
+  tlsPinPolicy?: 'tofu' | 'pinned';
+  /**
+   * Optional callback for security events emitted by the transport. Fires
+   * on TLS pin mismatch / unknown-pin (PINNED policy). Hooked into the
+   * existing event-bus by callers; the transport itself stays bus-agnostic.
+   */
+  onSecurityEvent?: (event: {
+    topic: 'tls-pin.mismatch' | 'tls-pin.unknown';
+    origin: string;
+    detail: Record<string, unknown>;
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,9 +106,11 @@ export interface StreamableHttpTransportOptions {
 
 export class StreamableHttpTransport {
   private readonly endpoint: string;
+  private readonly origin: string;
   private readonly options: StreamableHttpTransportOptions;
   private authToken: string | undefined;
   private sessionNonce: string | undefined;
+  private pinningDispatcher: Dispatcher | undefined;
 
   // Buffer of server-push messages received via the GET SSE stream.
   // recv() drains this queue as a shared async source.
@@ -81,6 +120,87 @@ export class StreamableHttpTransport {
   constructor(endpoint: string, options: StreamableHttpTransportOptions = {}) {
     this.endpoint = endpoint;
     this.options = options;
+    // Origin: scheme + host + port — see tls-pin.ts pin-key contract.
+    const u = new URL(endpoint);
+    this.origin = u.origin;
+  }
+
+  /**
+   * Returns the dispatcher to use for an outgoing request. Resolution order:
+   *   1. Explicit options.dispatcher (test MockAgent path) — wins.
+   *   2. tlsPinStore present → build (once, memoized) a TLS-pinning Agent.
+   *   3. undefined → undici uses the global default agent.
+   */
+  private getDispatcher(): Dispatcher | undefined {
+    if (this.options.dispatcher) return this.options.dispatcher;
+    if (!this.options.tlsPinStore) return undefined;
+    if (!this.pinningDispatcher) {
+      this.pinningDispatcher = this.buildPinningAgent();
+    }
+    return this.pinningDispatcher;
+  }
+
+  private buildPinningAgent(): Dispatcher {
+    const store = this.options.tlsPinStore!;
+    const policy = this.options.tlsPinPolicy ?? 'tofu';
+    const origin = this.origin;
+    const onSecurityEvent = this.options.onSecurityEvent;
+
+    // allowH2: false keeps the connector single-protocol — h2 introduces a
+    // second TLS handshake path the pin check would have to cover separately.
+    const baseConnector = buildConnector({ allowH2: false });
+
+    const pinningConnector: typeof baseConnector = (opts, callback) => {
+      baseConnector(opts, (err, socket) => {
+        if (err || !socket) {
+          callback(err as Error, null);
+          return;
+        }
+
+        // Only TLS sockets carry a peer cert; plaintext HTTP gets passed through.
+        const tls = socket as TLSSocket;
+        if (typeof tls.getPeerCertificate !== 'function') {
+          callback(null, socket);
+          return;
+        }
+
+        try {
+          const peer = tls.getPeerCertificate(true);
+          // peer.raw is a Buffer of the DER-encoded leaf cert.
+          if (!peer || !peer.raw || peer.raw.length === 0) {
+            const e = new Error('TLS handshake produced no peer certificate');
+            socket.destroy(e);
+            callback(e, null);
+            return;
+          }
+
+          verifyTlsPin(store, origin, peer.raw, policy);
+          callback(null, socket);
+        } catch (verifyErr) {
+          const e = verifyErr as Error;
+          if (onSecurityEvent) {
+            if (e instanceof TlsPinMismatchError) {
+              onSecurityEvent({
+                topic: 'tls-pin.mismatch',
+                origin,
+                detail: { expected: e.expected, seen: e.seen },
+              });
+            } else if (e instanceof TlsPinUnknownError) {
+              onSecurityEvent({
+                topic: 'tls-pin.unknown',
+                origin,
+                detail: {},
+              });
+            }
+          }
+          // Abort the connection — fail closed per tls-pinning.md.
+          socket.destroy(e);
+          callback(new TlsPinTransportError(origin, e), null);
+        }
+      });
+    };
+
+    return new Agent({ connect: pinningConnector });
   }
 
   /** OAuth Bearer token support. Call before send(). */
@@ -121,7 +241,7 @@ export class StreamableHttpTransport {
       method: 'POST',
       headers,
       body,
-      dispatcher: this.options.dispatcher,
+      dispatcher: this.getDispatcher(),
     });
 
     const contentType = (res.headers['content-type'] ?? '').toString();
@@ -193,7 +313,7 @@ export class StreamableHttpTransport {
         const res = await undiciRequest(this.endpoint, {
           method: 'GET',
           headers,
-          dispatcher: this.options.dispatcher,
+          dispatcher: this.getDispatcher(),
           signal,
         });
 
