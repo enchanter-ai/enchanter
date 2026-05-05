@@ -167,18 +167,213 @@ process.on('message', (msg) => {
     return;
   }
   if (msg.kind === 'tool-confirm-live') {
-    // v0.4 #1: live MCP-server replay runs in the parent process so the
-    // injected transportFactory (which carries non-serializable function
-    // state) can be applied. Forking into the worker for the live variant is
-    // reserved for the no-factory production path; until that lands the
-    // worker rejects this kind explicitly so silent drops don't mask bugs.
-    process.send?.({
-      ok: false,
-      error: 'tool-confirm-live should run in parent (no transportFactory injection over IPC)',
-    });
+    // v0.5 #1: live MCP-server replay now executes INSIDE the worker for true
+    // process isolation. The serverDescriptor is fully serializable (no
+    // function state). The worker spawns its own transport, drives a
+    // tools/call, and returns the ToolConfirmResult over IPC. The
+    // parent-process path (transportFactory injection) is preserved on the
+    // parent side as the 'in-process' runMode, used by hermetic tests that
+    // need to stub a transport without forking.
+    handleToolConfirmLive(msg).then(
+      (toolConfirmResult) => process.send?.({ ok: true, kind: 'tool-confirm-live', result: toolConfirmResult }),
+      (err) => process.send?.({ ok: false, error: err && err.message ? err.message : String(err) }),
+    );
     return;
   }
 });
+
+// ---------------------------------------------------------------------------
+// v0.5 #1 — tool-confirm-live INSIDE the worker
+// ---------------------------------------------------------------------------
+
+/* keep in sync with src/plugins/lich/sandbox.ts::structuralDiff (liveDiff)
+   — the diff function is duplicated here because the worker is a .mjs and
+   doesn't import the TS source. If you change one, change the other. */
+
+/* Build a transport from a SERIALIZABLE serverDescriptor. Only `stdio` is
+   supported in v0.5 #1; `http` returns a clear unsupported error so the parent
+   surfaces it as spawn-error. Stdlib only (node:child_process for stdio).
+
+   Returns: { send(msg), recv() async iterator, shutdown() } — same shape as
+   LiveReplayTransport in sandbox.ts. */
+async function buildTransport(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') {
+    const e = new Error('serverDescriptor missing or not an object');
+    e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+    throw e;
+  }
+  const kind = descriptor.kind;
+  if (kind === 'stdio') {
+    const { spawn } = await import('node:child_process');
+    const cmd = descriptor.cmd;
+    const args = Array.isArray(descriptor.args) ? descriptor.args : [];
+    if (typeof cmd !== 'string' || cmd.length === 0) {
+      const e = new Error('stdio descriptor: cmd missing');
+      e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+      throw e;
+    }
+    let child;
+    try {
+      child = spawn(cmd, args, {
+        // Strip the parent worker's env entirely — only PATH passes through.
+        env: { PATH: process.env.PATH ?? '' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const e = new Error(`stdio spawn failed: ${err && err.message ? err.message : String(err)}`);
+      e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+      throw e;
+    }
+
+    // Capture early spawn errors (ENOENT etc.) — they fire after spawn() returns.
+    let spawnErr;
+    child.on('error', (err) => { spawnErr = err; });
+
+    const queue = [];
+    let resolveNext;
+    let closed = false;
+    let buffer = Buffer.alloc(0);
+
+    child.stdout.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      let nl;
+      while ((nl = buffer.indexOf(0x0a)) !== -1) {
+        const lineBuf = buffer.subarray(0, nl);
+        buffer = buffer.subarray(nl + 1);
+        if (lineBuf.length === 0) continue;
+        const line = lineBuf.toString('utf8');
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue; // skip malformed lines
+        }
+        if (resolveNext) {
+          const r = resolveNext;
+          resolveNext = undefined;
+          r({ value: parsed, done: false });
+        } else {
+          queue.push(parsed);
+        }
+      }
+    });
+
+    const onClose = () => {
+      closed = true;
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = undefined;
+        r({ value: undefined, done: true });
+      }
+    };
+    child.stdout.on('end', onClose);
+    child.on('exit', onClose);
+
+    return {
+      async send(msg) {
+        if (spawnErr) {
+          const e = new Error(`stdio spawn error: ${spawnErr.message}`);
+          e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+          throw e;
+        }
+        if (closed) throw new Error('stdio transport closed');
+        const line = JSON.stringify(msg) + '\n';
+        await new Promise((res, rej) => {
+          child.stdin.write(line, 'utf8', (err) => (err ? rej(err) : res()));
+        });
+      },
+      recv() {
+        return {
+          [Symbol.asyncIterator]() { return this; },
+          next() {
+            if (queue.length > 0) {
+              return Promise.resolve({ value: queue.shift(), done: false });
+            }
+            if (closed) {
+              return Promise.resolve({ value: undefined, done: true });
+            }
+            return new Promise((r) => { resolveNext = r; });
+          },
+        };
+      },
+      shutdown() {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      },
+    };
+  }
+  if (kind === 'http') {
+    const e = new Error('http transport not yet supported inside the sandbox worker');
+    e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+    throw e;
+  }
+  const e = new Error(`unsupported transport kind: ${String(kind)}`);
+  e.liveResult = { failed: true, reason: 'spawn-error', detail: e.message };
+  throw e;
+}
+
+async function callViaTransport(transport, toolName, params) {
+  const id = 1;
+  const argsObject =
+    params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+  await transport.send({
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: { name: toolName, arguments: argsObject },
+  });
+  for await (const m of transport.recv()) {
+    if (m && m.id === id) {
+      if (m.error !== undefined) {
+        const detail =
+          m.error && typeof m.error === 'object' && typeof m.error.message === 'string'
+            ? m.error.message
+            : 'jsonrpc-error';
+        throw new Error(detail);
+      }
+      return m.result;
+    }
+  }
+  throw new Error('transport closed before response');
+}
+
+async function handleToolConfirmLive(msg) {
+  const start = Date.now();
+  let transport;
+  try {
+    transport = await buildTransport(msg.serverDescriptor);
+  } catch (err) {
+    // buildTransport stamps `liveResult` for known shapes; fall back to
+    // worker-error if it's a thrown Error without one.
+    if (err && typeof err.liveResult === 'object') {
+      return { ...err.liveResult, elapsed_ms: Date.now() - start };
+    }
+    return {
+      failed: true,
+      reason: 'spawn-error',
+      detail: err && err.message ? err.message : String(err),
+      elapsed_ms: Date.now() - start,
+    };
+  }
+  try {
+    const replayed = await callViaTransport(transport, msg.toolName, msg.params);
+    const differences = diff(msg.originalResponse, replayed);
+    return {
+      failed: false,
+      ok: differences.length === 0,
+      differences,
+      elapsed_ms: Date.now() - start,
+    };
+  } catch (err) {
+    return {
+      failed: true,
+      reason: 'worker-error',
+      detail: err && err.message ? err.message : String(err),
+      elapsed_ms: Date.now() - start,
+    };
+  } finally {
+    try { await transport.shutdown?.(); } catch { /* ignore */ }
+  }
+}
 
 // Signal readiness so the parent knows IPC is live.
 process.send?.({ kind: 'ready' });

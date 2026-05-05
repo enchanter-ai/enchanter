@@ -35,6 +35,7 @@ afterEach(() => {
     m5_tool_confirm_live: false,
     m5_tool_confirm_live_runner: runSandboxedToolCallLive,
     m5_transport_factory: undefined,
+    m5_replay_run_mode: 'worker',
     m5_replay_cache: new ReplayCache(256),
   });
 });
@@ -214,6 +215,7 @@ describe('lich adapter — m5_tool_confirm_live config flag wire-up', () => {
     let runnerCalls = 0;
     configureLich({
       m5_tool_confirm_live: true,
+      m5_replay_run_mode: 'in-process',
       m5_time_budget_ms: 4000,
       m5_replay_cache: new ReplayCache(8),
       m5_transport_factory: () => ({
@@ -254,6 +256,7 @@ describe('lich adapter — m5_tool_confirm_live config flag wire-up', () => {
   it('flag ON + diverging replay: ack flagged degraded with diff summary', async () => {
     configureLich({
       m5_tool_confirm_live: true,
+      m5_replay_run_mode: 'in-process',
       m5_time_budget_ms: 4000,
       m5_replay_cache: new ReplayCache(8),
       m5_transport_factory: (_d: ServerDescriptor) =>
@@ -291,6 +294,7 @@ describe('lich adapter — m5_tool_confirm_live config flag wire-up', () => {
   it('flag ON + sandbox failure: ack marked degraded (fail-open)', async () => {
     configureLich({
       m5_tool_confirm_live: true,
+      m5_replay_run_mode: 'in-process',
       m5_replay_cache: new ReplayCache(8),
       m5_transport_factory: (): LiveReplayTransport => makeStubTransport({}),
       m5_tool_confirm_live_runner: async (): Promise<ToolConfirmResult> => ({
@@ -322,6 +326,7 @@ describe('lich adapter — m5_tool_confirm_live config flag wire-up', () => {
     let runnerCalls = 0;
     configureLich({
       m5_tool_confirm_live: true,
+      m5_replay_run_mode: 'in-process',
       m5_replay_cache: cache,
       m5_transport_factory: () => makeStubTransport({}),
       m5_tool_confirm_live_runner: async (): Promise<ToolConfirmResult> => {

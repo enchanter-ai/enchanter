@@ -26,6 +26,7 @@ import {
   type ToolConfirmResult,
   type ToolConfirmDifference,
   type LiveTransportFactory,
+  type LiveRunMode,
   type ServerDescriptor,
 } from './lich/sandbox.js';
 import { ReplayCache } from './lich/replay-cache.js';
@@ -206,7 +207,11 @@ type ToolConfirmLiveRunner = (
   params: unknown,
   originalResponse: unknown,
   serverDescriptor: ServerDescriptor,
-  options: SandboxOptions & { transportFactory: LiveTransportFactory },
+  options: SandboxOptions & {
+    transportFactory?: LiveTransportFactory;
+    serverDescriptor?: ServerDescriptor;
+    runMode?: LiveRunMode;
+  },
 ) => Promise<ToolConfirmResult>;
 
 interface LichConfig {
@@ -222,8 +227,15 @@ interface LichConfig {
   m5_tool_confirm_live: boolean;
   /** Test-only injection point. Defaults to runSandboxedToolCallLive. */
   m5_tool_confirm_live_runner: ToolConfirmLiveRunner;
-  /** Required when m5_tool_confirm_live is on — produces a fresh transport. */
+  /** Required when m5_tool_confirm_live is on AND m5_replay_run_mode is
+   *  'in-process' — produces a fresh transport in the parent process. Unused
+   *  when the run mode is 'worker' (the worker spawns its own transport from
+   *  m5_replay_run_mode='worker' + payload.server_descriptor). */
   m5_transport_factory: LiveTransportFactory | undefined;
+  /** v0.5 #1 — execution mode for the live replay. Default 'worker' for true
+   *  process isolation; 'in-process' is for hermetic tests with stubbed
+   *  transports. See LiveRunMode in sandbox.ts. */
+  m5_replay_run_mode: LiveRunMode;
   /** LRU cache for live replay results, keyed by (schemaDigest, argsDigest). */
   m5_replay_cache: ReplayCache;
 }
@@ -237,6 +249,7 @@ const config: LichConfig = {
   m5_tool_confirm_live: false,
   m5_tool_confirm_live_runner: runSandboxedToolCallLive,
   m5_transport_factory: undefined,
+  m5_replay_run_mode: 'worker',
   m5_replay_cache: new ReplayCache(256),
 };
 
@@ -254,6 +267,7 @@ export function configureLich(patch: Partial<LichConfig>): void {
   // Use `in` so callers can explicitly reset the factory back to undefined
   // (an `!== undefined` guard would silently drop the reset).
   if ('m5_transport_factory' in patch) config.m5_transport_factory = patch.m5_transport_factory;
+  if (patch.m5_replay_run_mode !== undefined) config.m5_replay_run_mode = patch.m5_replay_run_mode;
   if (patch.m5_replay_cache !== undefined) config.m5_replay_cache = patch.m5_replay_cache;
 }
 
@@ -331,11 +345,21 @@ export const lichAdapter: PluginAdapter = {
       const toolName = typeof p.tool === 'string' ? p.tool : null;
       const hasResponse = 'response' in (event.payload as object);
       const factory = config.m5_transport_factory;
-      if (toolName !== null && hasResponse && factory !== undefined) {
-        const descriptor: ServerDescriptor =
-          p.server_descriptor && typeof p.server_descriptor === 'object'
-            ? (p.server_descriptor as ServerDescriptor)
-            : {};
+      const runMode = config.m5_replay_run_mode;
+      const descriptor: ServerDescriptor =
+        p.server_descriptor && typeof p.server_descriptor === 'object'
+          ? (p.server_descriptor as ServerDescriptor)
+          : {};
+      const hasDescriptor = Object.keys(descriptor).length > 0;
+      // Worker mode needs a server_descriptor in the payload; in-process mode
+      // needs a transportFactory in config. If the required input is missing
+      // for the configured mode, skip the replay (fail-open: M1 ack stands).
+      const canRun =
+        toolName !== null &&
+        hasResponse &&
+        ((runMode === 'worker' && hasDescriptor) ||
+          (runMode === 'in-process' && factory !== undefined));
+      if (canRun && toolName !== null) {
         ack = await augmentWithToolConfirmLive(
           ack,
           event,
@@ -345,6 +369,7 @@ export const lichAdapter: PluginAdapter = {
           p.tool_schema,
           descriptor,
           factory,
+          runMode,
         );
       }
     }
@@ -479,7 +504,8 @@ async function augmentWithToolConfirmLive(
   originalResponse: unknown,
   toolSchema: unknown,
   serverDescriptor: ServerDescriptor,
-  transportFactory: LiveTransportFactory,
+  transportFactory: LiveTransportFactory | undefined,
+  runMode: LiveRunMode,
 ): Promise<PluginAck> {
   const cache = config.m5_replay_cache;
   const schemaDigest = digestSchema(toolSchema);
@@ -495,7 +521,11 @@ async function augmentWithToolConfirmLive(
       params,
       originalResponse,
       serverDescriptor,
-      { time_budget_ms: config.m5_time_budget_ms, transportFactory },
+      {
+        time_budget_ms: config.m5_time_budget_ms,
+        runMode,
+        ...(transportFactory !== undefined ? { transportFactory } : {}),
+      },
     );
     cache.set(cacheKey, result);
   }

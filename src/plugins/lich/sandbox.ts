@@ -422,9 +422,22 @@ export type LiveTransportFactory = (
   descriptor: ServerDescriptor,
 ) => Promise<LiveReplayTransport> | LiveReplayTransport;
 
+/** v0.5 #1 — execution mode for runSandboxedToolCallLive.
+ *  - 'worker':     fork the sandbox worker; worker spawns the transport itself
+ *                  from a SERIALIZABLE serverDescriptor. True process isolation.
+ *                  Default for production.
+ *  - 'in-process': run the replay in the parent process via an injected
+ *                  transportFactory. Used by hermetic tests that stub a
+ *                  transport without spawning a real server. */
+export type LiveRunMode = 'worker' | 'in-process';
+
 export interface LiveSandboxOptions extends SandboxOptions {
-  /** Required: how to spin up the replay transport. */
-  readonly transportFactory: LiveTransportFactory;
+  /** In-process replay: required when runMode === 'in-process'. */
+  readonly transportFactory?: LiveTransportFactory;
+  /** Worker replay: required when runMode === 'worker'. Must be JSON-serializable. */
+  readonly serverDescriptor?: ServerDescriptor;
+  /** Default: 'worker' if serverDescriptor present, else 'in-process'. */
+  readonly runMode?: LiveRunMode;
 }
 
 /** Same diff routine as the worker's, mirrored in TS. Kept narrow on purpose:
@@ -513,23 +526,30 @@ async function callViaTransport(
 }
 
 /**
- * v0.4 #1 — MCP TOOL-CALL CONFIRMATION (live-replay variant). Re-spawns the
- * originating MCP server via `transportFactory(serverDescriptor)`, re-issues
- * the captured `tools/call` with the original params, and structurally diffs
- * the live result against `originalResponse`. Time/memory-budget contract,
+ * v0.5 #1 — MCP TOOL-CALL CONFIRMATION (live-replay variant). Re-issues the
+ * captured `tools/call` against a fresh transport and structurally diffs the
+ * live result against `originalResponse`. Time/memory-budget contract,
  * failure shapes, and structural-diff semantics match runSandboxedToolCall.
  *
- * The replay runs in the parent process: the MCP server it spawns is itself
- * out-of-process (per the transport's contract), so the resource isolation
- * already lives at the transport boundary. Test harnesses inject a stub
- * `transportFactory` returning an in-process transport — keeps the test path
- * hermetic without spawning real subprocesses.
+ * Two execution modes (see LiveRunMode):
+ *   - 'worker' (default for production): forks sandbox-worker.mjs; the worker
+ *     builds its own transport from a SERIALIZABLE serverDescriptor and runs
+ *     the replay in true process isolation. The parent process never sees the
+ *     replayed payload mid-flight — only the final ToolConfirmResult.
+ *   - 'in-process' (hermetic tests): runs the replay in the parent via an
+ *     injected transportFactory. Required because Function values aren't
+ *     IPC-serializable. Stubs/mocks of LiveReplayTransport go through here.
+ *
+ * Mode resolution: explicit options.runMode wins; else 'worker' if a
+ * serverDescriptor is supplied, else 'in-process'. Mismatch between the
+ * resolved mode and the supplied inputs throws synchronously — there's no
+ * silent fallback that would mask a misconfigured caller.
  *
  * Failure modes:
- *   - transportFactory throws  → spawn-error
- *   - transport hangs > budget → timeout
- *   - transport.send/recv error→ worker-error
- *   - any other thrown error   → worker-error (with detail)
+ *   - transportFactory throws / worker spawn fails → spawn-error
+ *   - transport hangs > budget                     → timeout
+ *   - transport.send/recv error                    → worker-error
+ *   - any other thrown error                       → worker-error (with detail)
  */
 export async function runSandboxedToolCallLive(
   toolName: string,
@@ -541,9 +561,47 @@ export async function runSandboxedToolCallLive(
   const start = Date.now();
   const time_budget_ms = options.time_budget_ms ?? DEFAULT_TIME_BUDGET_MS;
 
+  // Resolve runMode. The serverDescriptor argument is always present (legacy
+  // signature); presence of options.serverDescriptor is the disambiguator.
+  // [author judgment] Keep the positional arg for back-compat with v0.4
+  // callers; treat options.serverDescriptor as override-or-defer when set.
+  const effectiveDescriptor: ServerDescriptor =
+    options.serverDescriptor !== undefined ? options.serverDescriptor : serverDescriptor;
+  const hasFactory = options.transportFactory !== undefined;
+  const hasDescriptor =
+    effectiveDescriptor !== undefined && effectiveDescriptor !== null && Object.keys(effectiveDescriptor).length > 0;
+
+  const runMode: LiveRunMode =
+    options.runMode ?? (hasFactory && !hasDescriptor ? 'in-process' : 'worker');
+
+  if (runMode === 'worker' && !hasDescriptor) {
+    throw new Error(
+      "runSandboxedToolCallLive: runMode='worker' requires a non-empty serverDescriptor",
+    );
+  }
+  if (runMode === 'in-process' && !hasFactory) {
+    throw new Error(
+      "runSandboxedToolCallLive: runMode='in-process' requires a transportFactory",
+    );
+  }
+
+  if (runMode === 'in-process') {
+    return runInProcess(toolName, params, originalResponse, options.transportFactory!, time_budget_ms, start);
+  }
+  return runInWorker(toolName, params, originalResponse, effectiveDescriptor, options, start);
+}
+
+async function runInProcess(
+  toolName: string,
+  params: unknown,
+  originalResponse: unknown,
+  transportFactory: LiveTransportFactory,
+  time_budget_ms: number,
+  start: number,
+): Promise<ToolConfirmResult> {
   let transport: LiveReplayTransport;
   try {
-    transport = await options.transportFactory(serverDescriptor);
+    transport = await transportFactory({});
   } catch (err) {
     return {
       failed: true,
@@ -587,11 +645,150 @@ export async function runSandboxedToolCallLive(
 
   const result = await Promise.race([replayPromise, timeoutPromise]);
   if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-  // Best-effort transport teardown — never throws to caller.
   try {
     if (transport.shutdown) {
       await transport.shutdown();
     }
   } catch { /* ignore */ }
   return result;
+}
+
+interface WorkerToolConfirmLiveReply {
+  ok: true;
+  kind: 'tool-confirm-live';
+  result: ToolConfirmResult;
+}
+interface WorkerToolConfirmLiveError { ok: false; error: string }
+
+function isToolConfirmLiveReply(
+  v: unknown,
+): v is WorkerToolConfirmLiveReply | WorkerToolConfirmLiveError {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as { ok?: unknown; kind?: unknown };
+  if (o.ok === false) return true;
+  return o.ok === true && o.kind === 'tool-confirm-live';
+}
+
+async function runInWorker(
+  toolName: string,
+  params: unknown,
+  originalResponse: unknown,
+  serverDescriptor: ServerDescriptor,
+  options: LiveSandboxOptions,
+  start: number,
+): Promise<ToolConfirmResult> {
+  const time_budget_ms = options.time_budget_ms ?? DEFAULT_TIME_BUDGET_MS;
+  const memory_budget_mb = options.memory_budget_mb ?? DEFAULT_MEMORY_BUDGET_MB;
+
+  let child: ChildProcess;
+  try {
+    child = fork(workerPath(), [], {
+      silent: true,
+      env: { PATH: process.env['PATH'] ?? '' },
+      execArgv: [`--max-old-space-size=${memory_budget_mb}`, '--no-warnings'],
+    });
+  } catch (err) {
+    return {
+      failed: true,
+      reason: 'spawn-error',
+      detail: err instanceof Error ? err.message : String(err),
+      elapsed_ms: Date.now() - start,
+    };
+  }
+
+  return new Promise<ToolConfirmResult>((resolvePromise) => {
+    let settled = false;
+    const finish = (r: ToolConfirmResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!child.killed) {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      }
+      resolvePromise(r);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        failed: true,
+        reason: 'timeout',
+        detail: `wall-clock budget ${time_budget_ms}ms exceeded`,
+        elapsed_ms: Date.now() - start,
+      });
+    }, time_budget_ms);
+
+    child.on('error', (err) => {
+      finish({
+        failed: true,
+        reason: 'spawn-error',
+        detail: err.message,
+        elapsed_ms: Date.now() - start,
+      });
+    });
+
+    child.on('exit', (code, signal) => {
+      if (settled) return;
+      finish({
+        failed: true,
+        reason: 'worker-error',
+        detail: `worker exited code=${code} signal=${signal} before responding`,
+        elapsed_ms: Date.now() - start,
+      });
+    });
+
+    let ready = false;
+    child.on('message', (raw: unknown) => {
+      if (isReadyMessage(raw)) {
+        ready = true;
+        try {
+          child.send({
+            kind: 'tool-confirm-live',
+            toolName,
+            params,
+            originalResponse,
+            serverDescriptor,
+          });
+        } catch (err) {
+          finish({
+            failed: true,
+            reason: 'worker-error',
+            detail: err instanceof Error ? err.message : String(err),
+            elapsed_ms: Date.now() - start,
+          });
+        }
+        return;
+      }
+
+      if (!isToolConfirmLiveReply(raw)) {
+        finish({
+          failed: true,
+          reason: 'bad-response',
+          detail: 'worker sent unrecognized IPC message',
+          elapsed_ms: Date.now() - start,
+        });
+        return;
+      }
+
+      if (!ready) {
+        finish({
+          failed: true,
+          reason: 'bad-response',
+          detail: 'worker reply before ready signal',
+          elapsed_ms: Date.now() - start,
+        });
+        return;
+      }
+
+      if (raw.ok === true) {
+        finish(raw.result);
+      } else {
+        finish({
+          failed: true,
+          reason: 'worker-error',
+          detail: raw.error,
+          elapsed_ms: Date.now() - start,
+        });
+      }
+    });
+  });
 }
