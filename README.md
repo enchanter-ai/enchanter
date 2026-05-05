@@ -13,7 +13,7 @@
 
 Enchanter is a TypeScript SDK for building agentic AI applications that speak [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It wraps every outbound tool call in a 7-phase orchestrator lifecycle, runs it through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow, and more) observe, modify, or block before the request leaves your process.
 
-**v0.3.2 — full-stack agent SDK with shipped Rust observability surface.** 270 tests / 7 todo / 0 fail. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or TCP socket. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`.
+**v0.4.0 — full-stack agent SDK with shipped Rust observability surface.** 347 tests / 7 todo / 0 fail across 37 files. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or TCP socket. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`. Release pipeline (`scripts/publish-packages.ts` + `.github/workflows/publish.yml`) ships on `v*.*.*` tags.
 
 ## Install
 
@@ -137,15 +137,24 @@ The original v0.3 roadmap is fully landed. Sub-iterations:
 
 Test count: 144 → 270 / 7 todo / 0 fail across 31 files. All v0.3 features are default-off behind config flags for back-compat — existing v0.2 callers see unchanged behavior.
 
-## v0.4 roadmap
+## What shipped in v0.4
 
-Carry-overs and new fronts:
+All five carry-overs from v0.3 landed:
 
-1. **Real-MCP-server replay** for lich M5 tool-call confirmation. Currently the sandbox replays against a deterministic mock-transport projection; v0.4 re-spawns the originating server and diffs against a live result. Includes a per-(schema_digest, args_digest) LRU cache.
-2. **Trust-pin digest expansion** — currently populates `args / url / schemaDigests`. v0.4 threads `cmd / binaryDigest / envAllowlist` through `McpClient` via a new `transportDescriptor` constructor field.
-3. **Djinn D2 HMM persistence** — per-session HMM state is in-memory only; persist alongside the existing anchor store.
-4. **Gorgon dotted-module resolution** — Python imports record module names verbatim; resolve against `pyproject.toml` for cycle-detection accuracy.
-5. **Plugin-package publish to the npm registry** — `npm pack --dry-run` succeeds for all 10 packages today; the actual `npm publish` push is gated on a release ceremony decision.
+- **#1 Lich M5 real-MCP-server replay** — `runSandboxedToolCallLive` re-issues captured `tools/call` against an injectable `transportFactory`, structurally diffs against the original response. Per-`(schemaDigest, argsDigest)` LRU cache (default 256) avoids doubling latency on repeats.
+- **#2 Trust-pin digest expansion** — `TransportDescriptor` threads `cmd / args / binaryDigest / envAllowlist / url / schemaDigests` through `McpClient`. All 6 `TrustPinInputs` fields now contribute to the digest. `binaryDigest` is best-effort (cap 64 MiB, cached, fail-open on read failure).
+- **#3 Djinn D2 HMM persistence** — `PersistentHmmStore` (JSONL, replay-on-construct, corrupt-tail tolerant) keyed by sessionId. `hmm_store_path` config opts in.
+- **#4 Gorgon dotted-module resolution** — hand-rolled TOML parser extracts package roots from `[project]` / `[tool.poetry]` / `[tool.setuptools]` / `[tool.setuptools.packages.find]`. Roots merge additively; resolution walks `<root>/foo/bar.py` then `<root>/foo/bar/__init__.py`.
+- **#5 Plugin-package release pipeline** — `release:prep` bumps root + 10 packages in lockstep. `publish-packages.ts --dry-run` validates shape; `--publish` runs `npm publish --access public` per package, gated on `NPM_TOKEN`. CI on `v*.*.*` tags. See [`docs/RELEASE.md`](docs/RELEASE.md).
+
+## v0.5 roadmap
+
+Forward-looking work after v0.4:
+
+1. **Worker-side real-replay execution** — currently the live-replay path runs in the parent process via injected `transportFactory`. Move it inside the forked sandbox worker for true isolation.
+2. **HMM state-shape versioning** — add a `version` field to `HmmStateSnapshot` so future state-space changes (more states, renamed states, different observation buckets) trigger a hard reset rather than silently mis-interpret.
+3. **Actual `npm publish` of v0.4.0** — release pipeline is ready; awaits `NPM_TOKEN` setup + first tag.
+4. **Inspector → bridge bidirectional control** — currently the bridge is one-way (runtime → inspector). Add an "approve" / "veto" channel from the inspector back into the orchestrator's trust-gate phase.
 
 ## Contributing
 

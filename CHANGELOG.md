@@ -2,6 +2,22 @@
 
 All notable changes to Enchanter are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-05
+
+Carry-overs from the v0.3.0 ship list, all landed in one cycle. Test count: 270 → 347 / 7 todo / 0 fail across 37 files. Typecheck clean. All new behavior is default-off behind config flags.
+
+### Added
+- **Lich M5 real-MCP-server replay + LRU cache** (`src/plugins/lich/sandbox.ts::runSandboxedToolCallLive`, `src/plugins/lich/replay-cache.ts`) — second tool-call-confirmation variant that re-issues the captured `tools/call` against an injectable `transportFactory` and structurally diffs the live response. Per-`(schemaDigest, argsDigest)` LRU cache (default 256 entries) avoids doubling latency on repeated calls. Gated on `m5_tool_confirm_live: false`.
+- **Trust-pin digest expansion** (`src/transport/transport-descriptor.ts`) — `TransportDescriptor` carries `cmd / args / binaryDigest / envAllowlist` (stdio) or `url` (http). `describeStdio` resolves the binary via PATH walk and SHA-256s the file (cap 64 MiB, cached). `McpClient.transportDescriptor` threads the descriptor into the trust-gate hook so all 6 `TrustPinInputs` fields contribute to the digest. `binaryDigest` is best-effort: missing / unreadable files don't fail closed, just omit the field via canonical-JSON omission.
+- **Djinn D2 HMM persistence** (`src/plugins/djinn/hmm-store.ts`) — `InMemoryHmmStore` (default) and `PersistentHmmStore` (JSONL append-only, replay-on-construct, corrupt-tail tolerant). `IntentHmm.serialize` / `fromSnapshot` round-trip the forward state. Adapter wires load-on-configure, save-on-update, clear-on-anchor-clear. `hmm_store_path` config opts into persistence. Transition matrix is intentionally NOT persisted — hydrated sessions continue under whatever matrix is current at load time, with documented forward-looking note about adding a `version` field if state shape ever changes.
+- **Gorgon dotted-module resolution** (`src/plugins/gorgon/pyproject-resolver.ts`) — hand-rolled minimal TOML parser (no new deps) extracts package roots from `[tool.poetry]`, `[project]`, `[tool.setuptools]` and their `packages` / `package-dir` / `[tool.setuptools.packages.find]` variants. `resolveModule` walks `<root>/foo/bar.py` then `<root>/foo/bar/__init__.py` candidates with an injectable `FileSystemView` for testability. Roots from multiple build-system layouts are merged additively. Fail-open: invalid TOML / missing file → resolver becomes a no-op, extractor returns verbatim module names.
+- **Plugin-package release pipeline** (`scripts/publish-packages.ts`, `scripts/release-prep.ts`, `.github/workflows/publish.yml`, `docs/RELEASE.md`) — `release:prep` bumps root + all 10 plugin versions in lockstep + retightens `peerDependencies.enchanter` to `^<version>`. `publish-packages.ts --dry-run` validates package shape (name regex, version lockstep, `dist` in files, peer-range compat). `--publish` mode runs `npm publish --workspace ... --access public` per package; gated on `NPM_TOKEN`. CI workflow triggers on `v*.*.*` tags. `docs/RELEASE.md` walks the operator through bump → tag → push → CI publishes.
+
+### Changed
+- `IntentHmm` gains `serialize()` / `static fromSnapshot()` for state hydration. `IntentHmm` constructor / behavior unchanged for callers that don't persist.
+- `TrustGateHookContext` extended with optional `transportDescriptor`. Existing callers without a descriptor see unchanged behavior — `cmd / binaryDigest / envAllowlist` simply omitted from the digest as before.
+- `extractPythonImports` gains an optional `resolver` parameter. Unset → existing verbatim-module-name behavior.
+
 ## [0.3.0] — 2026-05-05
 
 Major release — full v0.3 roadmap landed across three sub-iterations (0.3.0 / 0.3.1 / 0.3.2). Test count: 144 → 270 / 7 todo / 0 fail across 31 files. Every new feature is default-off behind a config flag for back-compat.
