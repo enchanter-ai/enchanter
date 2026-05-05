@@ -9,6 +9,7 @@
 import type { PluginAdapter, PluginRegistry } from '../plugins/plugin-contract.js';
 import type { Bus } from '../bus/pubsub.js';
 import type { EnchantedEvent, PluginAck } from '../bus/event-types.js';
+import { TrustPinMismatchError } from '../registry/trust-pin.js';
 import {
   DEFAULT_PHASE_TIMEOUTS_MS,
   LIFECYCLE_PHASES,
@@ -49,6 +50,21 @@ export interface DispatchHandler {
   (ctx: RequestContext): Promise<unknown>;
 }
 
+/**
+ * Hook fired inside the trust-gate phase, AFTER plugin acks are collected
+ * but BEFORE dispatch. Used by McpClient to enforce trust-pin verification
+ * (FM 10 MCPoison closure). On TrustPinMismatchError, the orchestrator
+ * converts it to a SecurityVetoError so the failure surfaces through the
+ * existing required-plugin veto plumbing.
+ */
+export interface TrustGateHook {
+  (ctx: RequestContext): Promise<void> | void;
+}
+
+export interface RunOptions {
+  readonly trustGateHook?: TrustGateHook;
+}
+
 export class Orchestrator {
   private readonly registry: PluginRegistry;
   private readonly bus: Bus;
@@ -65,7 +81,7 @@ export class Orchestrator {
    * Run the 7-phase lifecycle. The dispatch handler is the only callback
    * permitted to talk to an external MCP server.
    */
-  async run(ctx: RequestContext, dispatch: DispatchHandler): Promise<unknown> {
+  async run(ctx: RequestContext, dispatch: DispatchHandler, options: RunOptions = {}): Promise<unknown> {
     let dispatchResult: unknown = undefined;
     for (const phase of LIFECYCLE_PHASES) {
       ctx.phase = phase;
@@ -107,6 +123,20 @@ export class Orchestrator {
           } else if (a.status === 'error' || a.degraded) {
             ctx.degraded_findings = [...ctx.degraded_findings, { plugin: p, reason: a.reason ?? 'degraded' }];
           }
+        }
+      }
+
+      // Trust-gate hook: AFTER plugin acks (so trust-pin layers on top of
+      // hydra's CVE veto, not a replacement). On mismatch, surface as
+      // SecurityVetoError so the existing veto plumbing handles short-circuit.
+      if (phase === 'trust-gate' && options.trustGateHook) {
+        try {
+          await options.trustGateHook(ctx);
+        } catch (err) {
+          if (err instanceof TrustPinMismatchError) {
+            throw new SecurityVetoError('trust-pin', phase, err.message);
+          }
+          throw err;
         }
       }
 

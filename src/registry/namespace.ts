@@ -101,6 +101,20 @@ export class NamespaceRegistry {
     return ident;
   }
 
+  /**
+   * Return the sorted list of schema digests for every tool registered under
+   * `server_id`. Used by the trust-pin enforcement path so a per-server
+   * digest-set change (added/dropped/mutated tool) flips the trust-pin.
+   */
+  schemaDigestsFor(server_id: string): string[] {
+    const prefix = `${server_id}.`;
+    const out: string[] = [];
+    for (const [qualified, ident] of this.byQualified) {
+      if (qualified.startsWith(prefix)) out.push(ident.schema_digest);
+    }
+    return out.sort();
+  }
+
   unregister(server_id: string, bare_name: string): void {
     const qualified = this.qualify(server_id, bare_name);
     this.byQualified.delete(qualified);

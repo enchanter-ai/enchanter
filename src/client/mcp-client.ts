@@ -13,6 +13,7 @@ import { Orchestrator } from '../orchestration/lifecycle.js';
 import { createRequestContext, type BudgetTier } from '../orchestration/request-context.js';
 import { InProcessBus } from '../bus/pubsub.js';
 import type { PluginAdapter } from '../plugins/plugin-contract.js';
+import { enforceTrustPin, type TrustPinInputs, type TrustPinStore } from '../registry/trust-pin.js';
 
 export interface Transport {
   send(msg: JsonRpcMessage): Promise<void>;
@@ -40,6 +41,18 @@ export interface McpClientConfig {
   readonly bus?: InProcessBus;
   /** Initial budget tier for new requests. */
   readonly budgetTier?: BudgetTier;
+  /**
+   * Optional trust-pin store (FM 10 MCPoison closure). When provided, every
+   * tools/call runs `enforceTrustPin` during the trust-gate phase. Default
+   * undefined → enforcement is OFF (back-compat with v0.3.1 callers).
+   */
+  readonly trustPinStore?: TrustPinStore;
+  /**
+   * Optional URL for remote (Streamable-HTTP) MCP servers. Folded into the
+   * trust-pin digest when present; absent for stdio servers. Optional even
+   * when `trustPinStore` is set — stdio callers leave it undefined.
+   */
+  readonly serverUrl?: string;
 }
 
 export class McpClient {
@@ -49,6 +62,8 @@ export class McpClient {
   readonly orchestrator: Orchestrator;
   private readonly transport: Transport;
   private readonly budgetTier: BudgetTier;
+  private readonly trustPinStore?: TrustPinStore;
+  private readonly serverUrl?: string;
   private nextRequestId = 1;
   private readonly pending = new Map<
     number | string,
@@ -61,6 +76,8 @@ export class McpClient {
     this.serverId = config.serverId;
     this.transport = config.transport;
     this.budgetTier = config.budgetTier ?? 'HIGH';
+    this.trustPinStore = config.trustPinStore;
+    this.serverUrl = config.serverUrl;
     this.registry = new NamespaceRegistry();
     this.bus = config.bus ?? new InProcessBus();
 
@@ -147,31 +164,60 @@ export class McpClient {
       payload: { tool: ident.bare_name, args, server_id: this.serverId },
     });
 
-    return this.orchestrator.run(ctx, async () => {
-      const resp = await this.sendRequest('tools/call', {
-        name: ident.bare_name,
-        arguments: args,
-      });
-      if (resp.error) {
-        throw new Error(`tools/call ${name}: ${resp.error.message}`);
-      }
-      // Pre-publish post-response topic for hydra (secret mask), pech (ledger),
-      // lich (review), emu (forecast), naga (artifact shape-check).
-      await this.bus.publish('mcp.tool.result.received', {
-        correlation_id: ctx.correlation_id,
-        session_id: ctx.session_id,
-        phase: 'post-response',
-        source: 'mcp-client',
-        budget_tier: ctx.budget_tier,
-        payload: {
-          tool: ident.bare_name,
-          result: resp.result,
-          vendor: this.serverId,
-          tokens: { input: 0, output: 0 },
-        },
-      });
-      return resp.result;
-    });
+    // Build the trust-gate hook only when a store is configured (back-compat:
+    // undefined trustPinStore → orchestrator skips the hook).
+    const trustGateHook = this.trustPinStore
+      ? async (): Promise<void> => {
+          // Inputs available at trust-gate from the live request:
+          //   - args (canonicalized into the digest as a JSON-stringified array)
+          //   - url (when set on the client; absent for stdio)
+          //   - schemaDigests (sorted set across this server's tools)
+          // TODO(v0.3.3): cmd, binaryDigest, envAllowlist are stdio-launch-time
+          // inputs not currently threaded through McpClient. Extend the
+          // constructor with a `transportDescriptor: { cmd, args, env, binaryDigest }`
+          // so the digest covers the full server identity, not just per-call args.
+          const inputs: TrustPinInputs = {
+            args: [ident.bare_name, JSON.stringify(args)],
+            ...(this.serverUrl !== undefined ? { url: this.serverUrl } : {}),
+            schemaDigests: this.registry.schemaDigestsFor(this.serverId),
+          };
+          await enforceTrustPin(this.trustPinStore!, this.serverId, inputs, this.bus, {
+            correlation_id: ctx.correlation_id,
+            session_id: ctx.session_id,
+            phase: 'trust-gate',
+          });
+        }
+      : undefined;
+
+    return this.orchestrator.run(
+      ctx,
+      async () => {
+        const resp = await this.sendRequest('tools/call', {
+          name: ident.bare_name,
+          arguments: args,
+        });
+        if (resp.error) {
+          throw new Error(`tools/call ${name}: ${resp.error.message}`);
+        }
+        // Pre-publish post-response topic for hydra (secret mask), pech (ledger),
+        // lich (review), emu (forecast), naga (artifact shape-check).
+        await this.bus.publish('mcp.tool.result.received', {
+          correlation_id: ctx.correlation_id,
+          session_id: ctx.session_id,
+          phase: 'post-response',
+          source: 'mcp-client',
+          budget_tier: ctx.budget_tier,
+          payload: {
+            tool: ident.bare_name,
+            result: resp.result,
+            vendor: this.serverId,
+            tokens: { input: 0, output: 0 },
+          },
+        });
+        return resp.result;
+      },
+      trustGateHook ? { trustGateHook } : {},
+    );
   }
 
   /** Publish a synthetic trust-gate event (used by tests + power-user paths). */
