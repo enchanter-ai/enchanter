@@ -9,11 +9,7 @@
   </a>
 </p>
 
-> Production-grade agent SDK with native Model Context Protocol support, hybrid orchestrator, and 10 capability plugins.
-
-Enchanter is a TypeScript SDK for building agentic AI applications that speak [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It wraps every outbound tool call in a 7-phase orchestrator lifecycle, runs it through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow, and more) observe, modify, or block before the request leaves your process.
-
-**v0.5.0 — full-stack agent SDK with shipped Rust observability surface and human-in-the-loop control.** 374 tests / 7 todo / 0 fail across 40 files (TS); Rust check + tests clean. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or bidirectional TCP socket. Inspector now sends approve/veto decisions back into the orchestrator's trust-gate via a control channel. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`.
+Enchanter is a TypeScript MCP client SDK with a hybrid orchestrator and 10 capability plugins, plus a Rust terminal cockpit ([`inspector/`](inspector/)) for live observability. Every outbound tool call rides a 7-phase request lifecycle, runs through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow) observe, modify, or block before the request leaves your process.
 
 ## Install
 
@@ -23,6 +19,14 @@ npm install enchanter
 
 Requires Node 22+.
 
+## Try it
+
+```bash
+npm install -g enchanter           # or: cd client/enchanter && npm install
+cd inspector && cargo build --release
+enchanter                          # opens the cockpit; runs the live demo
+```
+
 ## Quickstart
 
 ```typescript
@@ -31,15 +35,12 @@ import {
   StdioTransport,
   hydraAdapter,    // security veto + secret masking
   pechAdapter,     // cost ledger + budget thresholds
-  setBudget,
 } from 'enchanter';
 import { spawn } from 'node:child_process';
 
 // Spawn any MCP-spec server (filesystem, github, postgres, ...)
 const server = spawn('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/sandbox']);
 const transport = new StdioTransport(server.stdout!, server.stdin!);
-
-setBudget('fs', 100_000);
 
 const client = new McpClient({
   serverId: 'fs',
@@ -54,7 +55,7 @@ const result = await client.callTool('read_file', { path: 'config.txt' });
 // pech appends a ledger entry per call
 ```
 
-## What's in the box (v0.3.2)
+## What's in the box
 
 | Subsystem | Status |
 |---|---|
@@ -63,17 +64,17 @@ const result = await client.callTool('read_file', { path: 'config.txt' });
 | stdio transport (newline-delimited UTF-8 JSON-RPC 2.0, 8MB body cap) | ✓ |
 | Streamable HTTP transport (POST + GET, exp-backoff reconnect, resume disabled by default) | ✓ |
 | OAuth 2.1 + S256 PKCE + RFC 8707 audience binding + SSRF guard | ✓ |
-| **OAuth replay defense** — nonce + freshness store, in-memory + JSONL-persistent | ✓ v0.3 |
-| **TLS cert pinning** — TOFU + PINNED policies, hooked into the streaming HTTP transport | ✓ v0.3.1 |
-| **Full trust-pin** — SHA-256 over (cmd + args + url + schemaDigests), enforced in trust-gate | ✓ v0.3.2 |
+| OAuth replay defense (nonce + freshness store, in-memory + JSONL-persistent) | ✓ |
+| TLS cert pinning (TOFU + PINNED policies, hooked into the streaming HTTP transport) | ✓ |
+| Full trust-pin (SHA-256 over cmd + args + url + schemaDigests + binaryDigest + envAllowlist) | ✓ |
 | Namespace registry with SHA-256 schema-digest pin (MCPoison defense) | ✓ |
 | Tool name collision rejection | ✓ |
-| **JSONL event bridge** — runtime → inspector wire contract with stdout / file / TCP sinks | ✓ v0.3 |
-| **Rust terminal cockpit** ([`inspector/`](inspector/)) — 10 live views over the JSONL stream | ✓ v0.3 |
-| 10 plugin adapters (now all on v0.3 algorithms — pech file-backed ledger, lich M5 sandbox + tool-call confirm, djinn D2 HMM, gorgon Tarjan + Python AST) | ✓ v0.3.x |
-| Independently installable `@enchanter-ai/plugin-*` packages (workspace) | ✓ v0.3.2 |
+| JSONL event bridge (runtime → inspector wire contract; stdout / file / TCP sinks) | ✓ |
+| Bidirectional control channel (inspector approve/veto into the trust-gate, fail-closed) | ✓ |
+| Rust terminal cockpit ([`inspector/`](inspector/)) — 10 live views over the JSONL stream | ✓ |
+| 10 plugin adapters (in-tree) | ✓ |
+| Independently installable `@enchanter-ai/plugin-*` packages (workspace) | ✓ |
 | Live integration tested against `@modelcontextprotocol/server-filesystem` | ✓ |
-| 9 of 10 documented MCP failure modes mitigated | ✓ |
 
 ## The 10 plugins
 
@@ -94,18 +95,13 @@ Each plugin is its own repo under [github.com/enchanter-ai](https://github.com/e
 
 The companion prompt-engineering meta-engine [Wixie](https://github.com/enchanter-ai/wixie) runs the research → craft → converge → harden → translate lifecycle that produced the original architecture spec.
 
-## Live demo
+## Architecture
 
-```bash
-git clone https://github.com/enchanter-ai/enchanter.git
-cd enchanter
-npm install
-npx tsx scripts/live.ts
-```
+A thin per-request orchestrator owns the canonical request lifecycle. An in-process bus carries plugin findings as derived events. Required plugins (hydra, lich, naga, pech, sylph) fail-closed on missing ACK; advisory plugins (crow, djinn, emu, gorgon) fail-open with `degraded=true`. MCP spec primitives (Resources, Prompts, Tools, Sampling, Roots, Elicitation) are honored verbatim with OAuth 2.1 + PKCE + RFC 8707 audience binding for remote servers.
 
-Spawns the official `@modelcontextprotocol/server-filesystem`, runs through all 7 phases, and shows hydra masking real AWS-key-shaped strings + bearer tokens in file content, and vetoing synthetic `rm -rf /` and `cat ~/.ssh/id_rsa` calls on the bus.
+Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — a single binary that reads the runtime's JSONL event stream from stdin / file / socket and renders 10 live views (overview, plugins, events, security, cost, drift, codebase, replay, runtime totals, active tasks). The wire contract is documented at [`docs/event-schema.md`](docs/event-schema.md).
 
-Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — single binary, reads the runtime's JSONL event stream from stdin / file / socket, renders 10 live views (overview, plugins, events, security, cost, drift, codebase, replay, runtime totals, active tasks). The earlier TS CLI inspector and VS Code extension were retired at v0.3 in favor of the terminal-first approach. The browser dashboard was intentionally dropped at v0.2.1 — see `IMPLEMENTATION_SUMMARY.md`.
+Full architectural spec: produced by [Wixie](https://github.com/enchanter-ai/wixie).
 
 ## Streaming events to the inspector
 
@@ -119,51 +115,9 @@ ENCHANTER_BRIDGE=file:./run-2026-05-05.jsonl npx tsx scripts/run.ts -- npm test 
 
 When `stdout` is selected, the supervisor re-routes the wrapped child's stdout to stderr so the JSONL wire stays uncorrupted.
 
-## Architecture
+## Status
 
-A thin per-request orchestrator owns the canonical request lifecycle. An in-process bus carries plugin findings as derived events. Required plugins (hydra, lich, naga, pech, sylph) fail-closed on missing ACK; advisory plugins (crow, djinn, emu, gorgon) fail-open with `degraded=true`. MCP spec primitives (Resources, Prompts, Tools, Sampling, Roots, Elicitation) are honored verbatim with OAuth 2.1 + PKCE + RFC 8707 audience binding for remote servers.
-
-Full architectural spec: produced by [Wixie](https://github.com/enchanter-ai/wixie) — see `output-opus-4-7.json` in that repo's prompts directory. ADRs for the three load-bearing decisions (hybrid coordination, security model, budget tiers) are at `adr/`.
-
-See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for the per-file inventory + v0.3 follow-up plan.
-
-## What shipped in v0.3
-
-The original v0.3 roadmap is fully landed. Sub-iterations:
-
-- **v0.3.0** — OAuth replay defense (nonce + freshness store, persistent JSONL), runtime → inspector JSONL bridge with explicit wire schema, file-backed pech ledger.
-- **v0.3.1** — TLS cert pinning (FM 6), full trust-pin store (FM 10), lich M5 sandboxed code review, djinn D2 HMM drift detection (3-state ON_TASK / SIDEQUEST / LOST), gorgon Tarjan SCC + Python AST extractor.
-- **v0.3.2** — `@enchanter-ai/plugin-*` workspace packages, orchestrator → trust-pin enforcement, `ENCHANTER_BRIDGE` env-switch supervisor wire-up, lich M5 tool-call confirmation variant.
-
-Test count: 144 → 270 / 7 todo / 0 fail across 31 files. All v0.3 features are default-off behind config flags for back-compat — existing v0.2 callers see unchanged behavior.
-
-## What shipped in v0.4
-
-All five carry-overs from v0.3 landed:
-
-- **#1 Lich M5 real-MCP-server replay** — `runSandboxedToolCallLive` re-issues captured `tools/call` against an injectable `transportFactory`, structurally diffs against the original response. Per-`(schemaDigest, argsDigest)` LRU cache (default 256) avoids doubling latency on repeats.
-- **#2 Trust-pin digest expansion** — `TransportDescriptor` threads `cmd / args / binaryDigest / envAllowlist / url / schemaDigests` through `McpClient`. All 6 `TrustPinInputs` fields now contribute to the digest. `binaryDigest` is best-effort (cap 64 MiB, cached, fail-open on read failure).
-- **#3 Djinn D2 HMM persistence** — `PersistentHmmStore` (JSONL, replay-on-construct, corrupt-tail tolerant) keyed by sessionId. `hmm_store_path` config opts in.
-- **#4 Gorgon dotted-module resolution** — hand-rolled TOML parser extracts package roots from `[project]` / `[tool.poetry]` / `[tool.setuptools]` / `[tool.setuptools.packages.find]`. Roots merge additively; resolution walks `<root>/foo/bar.py` then `<root>/foo/bar/__init__.py`.
-- **#5 Plugin-package release pipeline** — `release:prep` bumps root + 10 packages in lockstep. `publish-packages.ts --dry-run` validates shape; `--publish` runs `npm publish --access public` per package, gated on `NPM_TOKEN`. CI on `v*.*.*` tags. See [`docs/RELEASE.md`](docs/RELEASE.md).
-
-## What shipped in v0.5
-
-Three of four v0.5 carry-overs landed; the fourth (`npm publish`) is gated on operator authorization.
-
-- **#1 Worker-side real-replay execution** — `runSandboxedToolCallLive` defaults to `runMode: 'worker'`, dispatching the live replay inside the forked sandbox worker. True process isolation. Stdio MCP transports today; http worker variant flagged for v0.6.
-- **#2 HMM state-shape versioning** — `HMM_STATE_VERSION = 1` stamped on every snapshot. Mismatched versions or posterior lengths trigger a hard reset rather than silent corruption. Pre-v0.5 versionless snapshots treated as `v0` → reset.
-- **#4 Bidirectional control channel** — `Source::SocketControl` opens a read+write TCP transport. `request.approval` event carries `correlation_id / plugin / reason / payload`; inspector pops a `PENDING APPROVAL` banner and `a` / `v` send the decision back. Trust-gate awaits with a 30-second timeout, **fail-closed**. See `docs/event-schema.md` for the wire protocol.
-
-## v0.6 roadmap
-
-Forward-looking work after v0.5:
-
-1. **HTTP transport inside the sandbox worker** — currently stdio-only; v0.6 closes with an `import('undici')` fetch loop honoring the existing 8 MB body cap.
-2. **`PENDING APPROVAL` banner across all views** — currently only renders in overview; lift to a shared widget consumed by `draw_app`.
-3. **Auto-reconnect for `Source::SocketControl`** — runtime restart mid-session currently ends the inbound stream; add backoff + reconnect.
-4. **`transportDescriptor.envAllowlist` / `binaryDigest` honored by worker stdio spawn** — currently forces `env: { PATH }` and ignores binaryDigest.
-5. **Actual `npm publish` of v0.4.0 / v0.5.0** — release pipeline is ready; awaits `NPM_TOKEN` setup + first tag.
+Current production version: **v0.5.0**. Every roadmap item from `0.2` through `0.5` is shipped — see [CHANGELOG.md](CHANGELOG.md) for per-version detail. Next: HTTP transport inside the sandbox worker, npm-publish ceremony for the `@enchanter-ai/plugin-*` packages, and auto-reconnect for the bidirectional control socket.
 
 ## Contributing
 
