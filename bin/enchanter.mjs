@@ -78,14 +78,14 @@ if (isCockpitDefault || isCockpitSubcommand) {
 
   let cockpitArgs = argv;
 
-  if (isCockpitDefault) {
-    // Bare `enchanter`: prefer live with absolute script path; if the
-    // script is missing (standalone-binary install) the Rust binary's
-    // own fallback handles the rest.
-    if (liveScriptExists) {
-      cockpitArgs = ['live', '--script', liveScript];
-    }
-  } else if (first === 'live' && !argv.includes('--script')) {
+  // Bare `enchanter` is NO LONGER auto-routed to live mode. The Rust
+  // binary's default_command picks tail-of-real-Claude-hooks when hooks
+  // are installed (the right default for real users) and prints a help
+  // message when not. Forcing `live --script` here would mask that logic
+  // and put users into the showcase loop, defeating the real-data wire-up.
+  // Users who explicitly want the showcase: `enchanter live` (we still
+  // inject the absolute script path below).
+  if (first === 'live' && !argv.includes('--script')) {
     // Explicit `enchanter live` without --script: inject the package-resolved
     // absolute path so it works from any cwd.
     if (liveScriptExists) {
