@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -37,6 +38,12 @@ pub enum Source {
     /// The child's stderr is forwarded to the inspector's stderr so the
     /// user can see banners/errors from the producer alongside the cockpit.
     Exec(String),
+    /// Follow a JSONL file like `tail -f`. Reads existing content first,
+    /// then polls for new bytes every 200 ms. Survives rotation (file
+    /// truncation / rename swap) and tolerates the file not existing yet
+    /// at spawn time (retries up to 30 s). Pairs with hook-style producers
+    /// that append one event line per operation.
+    Tail(PathBuf),
 }
 
 /// Outbound control half of a bidirectional transport. Cheap to clone — wraps
@@ -126,6 +133,9 @@ impl Transport {
             Source::Exec(cmd) => {
                 tokio::spawn(run_exec(cmd, tx));
             }
+            Source::Tail(path) => {
+                tokio::spawn(run_tail(path, tx));
+            }
         }
 
         Transport {
@@ -170,6 +180,10 @@ impl Transport {
             }
             Source::Exec(cmd) => {
                 tokio::spawn(run_exec(cmd, tx));
+                ControlWriter::disconnected()
+            }
+            Source::Tail(path) => {
+                tokio::spawn(run_tail(path, tx));
                 ControlWriter::disconnected()
             }
         };
@@ -354,6 +368,237 @@ async fn run_exec(cmd: String, tx: mpsc::Sender<Event>) {
 /// Realistic events fit comfortably under 64 KiB; 1 MiB leaves a 16x margin
 /// for unusually large `tool.result` payloads.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// Tail polling interval. 200 ms is the documented default — fast enough
+/// that the cockpit feels live, slow enough that an idle file doesn't
+/// burn a core. Lines appended between polls batch on the next tick.
+const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How long to wait for the file to first appear before logging at warn
+/// and continuing to retry indefinitely. Pairs with hook-script setups
+/// where the inspector launches before any operation has fired.
+const TAIL_WAIT_FOR_CREATE: Duration = Duration::from_secs(30);
+
+/// Tail a JSONL file, surviving rotation and tolerating late creation.
+/// Returns when the consumer (`tx`) is dropped.
+async fn run_tail(path: PathBuf, tx: mpsc::Sender<Event>) {
+    use tokio::fs::{metadata, File};
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
+
+    // --- 1. Wait for the file to exist ---------------------------------
+    let waited_start = std::time::Instant::now();
+    let mut warned_about_wait = false;
+    loop {
+        if metadata(&path).await.is_ok() {
+            break;
+        }
+        if !warned_about_wait && waited_start.elapsed() >= TAIL_WAIT_FOR_CREATE {
+            tracing::warn!(
+                ?path,
+                "tail: file still missing after 30s, will keep retrying"
+            );
+            warned_about_wait = true;
+        } else if !warned_about_wait {
+            tracing::info!(?path, "tail: waiting for file to appear");
+        }
+        if tx.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let mut read_offset: u64 = 0;
+    // Carries a partial last line across polls when a write splits a line.
+    let mut pending: Vec<u8> = Vec::with_capacity(4096);
+
+    loop {
+        // --- 2. Open / re-open the file --------------------------------
+        let mut file = match File::open(&path).await {
+            Ok(f) => f,
+            Err(err) => {
+                tracing::warn!(?path, %err, "tail: open failed, retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if tx.is_closed() {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        // Seek to the offset we left off at. Fresh open after rotation
+        // resets `read_offset` to 0 first (handled below).
+        if read_offset > 0 {
+            if let Err(err) = file.seek(SeekFrom::Start(read_offset)).await {
+                tracing::warn!(?path, %err, "tail: seek failed, restarting from 0");
+                read_offset = 0;
+                pending.clear();
+                continue;
+            }
+        }
+
+        // --- 3. Inner read loop ---------------------------------------
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            // Drain any new bytes available right now.
+            match file.read(&mut buf).await {
+                Ok(0) => {
+                    // EOF — go to sleep and check for rotation / new bytes.
+                }
+                Ok(n) => {
+                    read_offset = read_offset.saturating_add(n as u64);
+                    if !consume_chunk(&buf[..n], &mut pending, &tx, "tail").await {
+                        return;
+                    }
+                    // Loop back to immediately drain more — the file may
+                    // be receiving a burst.
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!(?path, %err, "tail: read error, will retry");
+                    break; // drop file handle, retry from top of outer loop
+                }
+            }
+
+            // EOF — pause briefly, then check for rotation or growth.
+            tokio::time::sleep(TAIL_POLL_INTERVAL).await;
+            if tx.is_closed() {
+                return;
+            }
+
+            match metadata(&path).await {
+                Ok(meta) => {
+                    let len = meta.len();
+                    if len < read_offset {
+                        // File was truncated or rotated in place.
+                        tracing::info!(?path, len, prev = read_offset, "tail: file rotated");
+                        read_offset = 0;
+                        pending.clear();
+                        break; // re-open from the top
+                    }
+                    // len >= read_offset: either grew (next iteration of
+                    // the inner loop reads it) or unchanged (sleep again).
+                }
+                Err(_) => {
+                    // File disappeared (likely rotation: rename then create).
+                    // Wait up to 5s for it to come back.
+                    let gone_at = std::time::Instant::now();
+                    let mut reappeared = false;
+                    while gone_at.elapsed() < Duration::from_secs(5) {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        if tx.is_closed() {
+                            return;
+                        }
+                        if metadata(&path).await.is_ok() {
+                            reappeared = true;
+                            break;
+                        }
+                    }
+                    if !reappeared {
+                        tracing::warn!(?path, "tail: file gone for 5s, continuing to wait");
+                    }
+                    // Either way, treat as rotation: reset and re-open.
+                    read_offset = 0;
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Consume a chunk read from a tailed file: split on newlines, dispatch
+/// each completed line through the same parse / schema-validate pipeline
+/// `forward_lines` uses, buffer any trailing partial line in `pending`
+/// for the next chunk. Returns `false` when the consumer dropped.
+async fn consume_chunk(
+    chunk: &[u8],
+    pending: &mut Vec<u8>,
+    tx: &mpsc::Sender<Event>,
+    kind: &'static str,
+) -> bool {
+    let mut start = 0;
+    for (i, &b) in chunk.iter().enumerate() {
+        if b == b'\n' {
+            // Line is `pending` + chunk[start..i]
+            let line_bytes: Vec<u8> = if pending.is_empty() {
+                chunk[start..i].to_vec()
+            } else {
+                let mut v = std::mem::take(pending);
+                v.extend_from_slice(&chunk[start..i]);
+                v
+            };
+            start = i + 1;
+            if !dispatch_line(&line_bytes, tx, kind).await {
+                return false;
+            }
+        }
+    }
+    // Trailing partial — append to pending for next chunk.
+    if start < chunk.len() {
+        let remainder = &chunk[start..];
+        if pending.len() + remainder.len() > MAX_LINE_BYTES {
+            tracing::warn!(
+                bytes = pending.len() + remainder.len(),
+                max = MAX_LINE_BYTES,
+                kind,
+                "dropping oversized partial line"
+            );
+            pending.clear();
+            // Discard remainder too: the next \n will resync.
+        } else {
+            pending.extend_from_slice(remainder);
+        }
+    }
+    true
+}
+
+/// Parse + schema-validate a single line, send to consumer. Returns
+/// `false` once the consumer drops. Mirrors the inner block of
+/// `forward_lines` so both paths drop malformed lines identically.
+async fn dispatch_line(bytes: &[u8], tx: &mpsc::Sender<Event>, kind: &'static str) -> bool {
+    let mut bytes = bytes;
+    if bytes.last() == Some(&b'\r') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    if bytes.is_empty() {
+        return true;
+    }
+    if bytes.len() > MAX_LINE_BYTES {
+        tracing::warn!(bytes = bytes.len(), max = MAX_LINE_BYTES, kind, "dropping oversized line");
+        return true;
+    }
+    let line = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(%err, kind, "non-utf8 line skipped");
+            return true;
+        }
+    };
+    match crate::event::parse_line(line) {
+        Ok(event) => {
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(value) => {
+                    if let Err(err) = crate::schema::validate(&value) {
+                        tracing::warn!(line = %line, %err, "schema validation failed, dropping event");
+                        return true;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(line = %line, %err, "schema-pass json reparse failed");
+                    return true;
+                }
+            }
+            if let Err(err) = tx.send(event).await {
+                tracing::debug!(%err, kind, "transport consumer dropped, exiting");
+                return false;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(line = %line, %err, "skipping malformed event line");
+        }
+    }
+    true
+}
 
 /// Generic line pump. Reads lines from any `AsyncBufRead`, parses each via
 /// `crate::event::parse_line`, forwards `Ok` events into `tx`. Skips empty

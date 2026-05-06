@@ -43,6 +43,10 @@ pub enum Source {
     /// Closes the producer↔consumer loop in one command without an external
     /// shell pipe.
     Exec(String),
+    /// Follow a JSONL file like `tail -f`. Yields events as new lines are
+    /// appended, surviving file rotation. The path may not yet exist when
+    /// the inspector starts — it'll wait and retry.
+    Tail(PathBuf),
 }
 
 /// Resolved runtime configuration handed to `app::run`.
@@ -118,16 +122,31 @@ struct InspectArgs {
     /// Example: `enchanter inspect --exec "npx tsx scripts/demo-live.ts"`.
     #[arg(long, value_name = "CMD", conflicts_with_all = ["from", "socket", "control_socket"])]
     exec: Option<String>,
+
+    /// Follow a JSONL file as it's appended (like `tail -f`). Pairs with the
+    /// Claude Code hook emitter — the hook script writes one line per
+    /// operation, the inspector picks them up live. The file may not exist
+    /// yet at startup; the tailer waits and retries.
+    #[arg(long, value_name = "JSONL_FILE",
+          conflicts_with_all = ["from", "socket", "control_socket", "exec"])]
+    tail: Option<PathBuf>,
 }
 
 impl InspectArgs {
     fn into_config(self) -> Config {
-        let source = match (self.from, self.socket, self.control_socket, self.exec) {
-            (_, _, _, Some(cmd)) => Source::Exec(cmd),
-            (Some(path), _, _, None) => Source::File(path),
-            (None, _, Some(addr), None) => Source::SocketControl(addr),
-            (None, Some(addr), None, None) => Source::Socket(addr),
-            (None, None, None, None) => Source::Stdin,
+        let source = match (
+            self.from,
+            self.socket,
+            self.control_socket,
+            self.exec,
+            self.tail,
+        ) {
+            (_, _, _, Some(cmd), _) => Source::Exec(cmd),
+            (_, _, _, _, Some(path)) => Source::Tail(path),
+            (Some(path), _, _, None, None) => Source::File(path),
+            (None, _, Some(addr), None, None) => Source::SocketControl(addr),
+            (None, Some(addr), None, None, None) => Source::Socket(addr),
+            (None, None, None, None, None) => Source::Stdin,
         };
         Config { source }
     }
