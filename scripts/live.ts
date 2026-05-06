@@ -295,7 +295,13 @@ async function main(): Promise<void> {
           await client.bus.publish('emu.context_update', {
             phase: 'pre-dispatch',
             source: 'emu',
-            payload: { context_size: 12000 + iter * 50, turn_estimate: 25 + Math.floor(iter / 4) },
+            // Turns LEFT — start at a 200-turn budget and decrement. Floor
+            // at 12 so the cockpit never shows 0 (sessions usually wrap up
+            // earlier than that and emu's CI band acknowledges uncertainty).
+            payload: {
+              context_size: 12000 + iter * 50,
+              turn_estimate: Math.max(12, 200 - Math.floor(iter * 0.7)),
+            },
           });
           await client.bus.publish('crow.trust.scored', {
             phase: 'trust-gate',

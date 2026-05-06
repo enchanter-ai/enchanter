@@ -189,6 +189,13 @@ fn default_command() -> Command {
     let hooks_wired_up = hook_jsonl.exists()
         || hook_jsonl.parent().map(|p| p.is_dir()).unwrap_or(false);
     if hooks_wired_up {
+        // Log so users can grep ~/.cache/enchanter/inspector.log to confirm
+        // which mode bare `enchanter` picked — useful when troubleshooting
+        // "is this real or showcase data" without restarting the binary.
+        tracing::info!(
+            path = %hook_jsonl.display(),
+            "default_command: hooks wired up — tailing real Claude Code stream"
+        );
         return Command::Inspect(InspectArgs {
             tail: Some(hook_jsonl),
             ..InspectArgs::default()
