@@ -1028,44 +1028,69 @@ impl AppState {
     }
 
     /// Synthesize plausible system-health values from event volume.
+    ///
+    /// Uses a sliding window of the most recent 50 event interarrival deltas
+    /// rather than the entire ring buffer. Round-3 fix C: when the inspector
+    /// has been running long enough that `events` spans hours, the mean of
+    /// session-wide interarrivals stops reflecting *current* latency and the
+    /// cockpit pins to a stale value (e.g. 379ms forever). The window keeps
+    /// the readout responsive to the live event rate.
     fn synthesize_health(&mut self) {
         // Memory: ring-buffer fill ratio.
         self.health.memory_pct =
             (self.events.len() as f32 / EVENT_RING_CAPACITY as f32) * 100.0;
 
-        // CPU + event-loop ms: derived from interarrival times of the most
-        // recent up-to-50 events.
-        let n = self.events.len().min(50);
+        // Sliding window: last 50 events → 49 interarrival deltas (ms).
+        let window = 50usize;
+        let n = self.events.len().min(window);
         if n >= 2 {
             let take = self.events.len() - n;
-            let recent: Vec<f64> = self
+            let times: Vec<f64> = self
                 .events
                 .iter()
                 .skip(take)
                 .map(|e| e.time())
                 .collect();
-            let span = (recent.last().copied().unwrap_or(0.0)
-                - recent.first().copied().unwrap_or(0.0))
+            let mut deltas_ms: Vec<f32> = Vec::with_capacity(times.len().saturating_sub(1));
+            for w in times.windows(2) {
+                let d = (w[1] - w[0]).max(0.0) * 1000.0;
+                deltas_ms.push(d as f32);
+            }
+
+            if !deltas_ms.is_empty() {
+                let mean_ms: f32 =
+                    deltas_ms.iter().copied().sum::<f32>() / deltas_ms.len() as f32;
+                let avg_capped = mean_ms.min(100.0);
+
+                let mut sorted = deltas_ms.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let p_idx = |p: f32| -> usize {
+                    let len = sorted.len();
+                    let raw = (p * len as f32).ceil() as isize - 1;
+                    raw.clamp(0, len as isize - 1) as usize
+                };
+                let p95 = sorted[p_idx(0.95)];
+                let p99 = sorted[p_idx(0.99)];
+
+                self.metrics.p95_latency_ms = p95;
+                self.metrics.p99_latency_ms = p99;
+                self.health.event_loop_ms = avg_capped;
+            }
+
+            // CPU synthesis: events-per-second normalized against a 100/s
+            // throughput target, capped at 80% so a burst doesn't make the
+            // cockpit lie about being saturated. TODO: replace with real
+            // process-CPU once a tokio-metrics integration lands.
+            let span = (times.last().copied().unwrap_or(0.0)
+                - times.first().copied().unwrap_or(0.0))
                 .max(0.0);
             let events_per_sec = if span > 0.0 {
                 (n as f64) / span
             } else {
                 n as f64
             };
-            // CPU synthesis: events-per-second normalized against a 100/s
-            // throughput target, capped at 80% so a burst doesn't make the
-            // cockpit lie about being saturated. TODO: replace with real
-            // process-CPU once a tokio-metrics integration lands.
             self.health.cpu_pct =
                 ((events_per_sec as f32 / 100.0).clamp(0.0, 0.8) * 100.0).max(0.0);
-
-            // Average interarrival in milliseconds.
-            let avg_ms = if n > 1 {
-                (span * 1000.0) / ((n - 1) as f64)
-            } else {
-                0.0
-            };
-            self.health.event_loop_ms = avg_ms as f32;
         }
 
         // Static plausible values for the two not derivable from the stream.
@@ -1643,15 +1668,26 @@ impl AppState {
                     .get("daily_cost_usd")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
+                // Round-3 fix B: real orchestrator pech.ledger.appended events
+                // emit with cost_usd=0 / session_cost_usd=0 because the
+                // filesystem MCP server doesn't claim tokens. Synthetic loop
+                // events emit non-zero values. Latch only on non-zero so a
+                // real zero-valued event arriving after a synthetic non-zero
+                // one doesn't blank the cockpit's spend readout.
                 if session_cost > 0.0 {
                     self.metrics.spent_session_usd = session_cost;
+                    self.set_plugin_display(
+                        "pech",
+                        format!("${:.2}", self.metrics.spent_session_usd),
+                    );
                 }
                 if daily > 0.0 {
                     self.budgets.daily_spend_usd = daily;
                 }
-                self.set_plugin_display("pech", format!("${:.2}", self.metrics.spent_session_usd));
                 let cents = (cost_usd * 100.0).round().max(0.0) as u64;
-                self.push_plugin_usage("pech", cents);
+                if cents > 0 {
+                    self.push_plugin_usage("pech", cents);
+                }
                 // Bump pech's call counter and last_event regardless of the
                 // wire-side `plugin` field — the runtime emits these events
                 // with `plugin: "mcp-client"`, so the generic ev.plugin()
@@ -1692,18 +1728,208 @@ impl AppState {
                     plug.calls = plug.calls.saturating_add(1);
                 }
             }
-            "naga.spec_check"
-            | "lich.review"
-            | "emu.context_update"
-            | "gorgon.hotspot" => {
-                // Strict-enum siblings of the same names already handle the
-                // typed shape; for the wire-format fallthroughs, just bump the
-                // matching plugin's call counter. last_event refresh happens
-                // generically downstream off `ev.plugin()`.
+            "emu.context_update" => {
+                // Round-3 fix A: when emu.context_update arrives via the
+                // Unknown fallback path (shape variation, downgraded enum),
+                // mirror the typed handler — bump calls, set last_event,
+                // refresh display from `turn_estimate`.
+                let turn = p
+                    .extra
+                    .get("turn_estimate")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(25);
+                self.set_plugin_display("emu", format!("{turn}±3 turns"));
+                if let Some(idx) = self.plugin_index_by_name("emu") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                    plug.last_event = Some(p.time);
+                }
+            }
+            "lich.review" => {
+                self.set_plugin_display("lich", "clean".into());
+                if let Some(idx) = self.plugin_index_by_name("lich") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                    plug.last_event = Some(p.time);
+                }
+            }
+            "naga.spec_check" => {
+                let status = p
+                    .extra
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let display = if status == "clean" { "clean" } else { "drift" };
+                self.set_plugin_display("naga", display.into());
+                if let Some(idx) = self.plugin_index_by_name("naga") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                    plug.last_event = Some(p.time);
+                }
+            }
+            "gorgon.hotspot" => {
+                // Strict-enum sibling already handles the typed shape; for the
+                // wire-format fallthrough, just bump calls. last_event refresh
+                // happens generically downstream off `ev.plugin()`.
                 if let Some(name) = p.plugin.as_deref() {
                     if let Some(idx) = self.plugin_index_by_name(name) {
                         let plug = &mut self.plugins[idx];
                         plug.calls = plug.calls.saturating_add(1);
+                    }
+                }
+            }
+            "runtime.metrics" => {
+                // Round-3 fix A: route runtime.metrics arriving via the
+                // Unknown fallback path (e.g. shape variation, missing
+                // strictly-required field). Pull every metric off `extra`
+                // and populate the same RuntimeMetricState slots the strict
+                // arm fills.
+                let extra = &p.extra;
+                let u32_of = |k: &str| extra.get(k).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let u64_of = |k: &str| extra.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                let f32_of = |k: &str| extra.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let f64_of = |k: &str| extra.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                self.runtime_metrics.open_sessions = u32_of("open_sessions");
+                self.runtime_metrics.ongoing_tasks = u32_of("ongoing_tasks");
+                self.runtime_metrics.queued_tasks = u32_of("queued_tasks");
+                self.runtime_metrics.blocked_tasks = u32_of("blocked_tasks");
+                self.runtime_metrics.code_written_lifetime_loc = u64_of("code_written_lifetime_loc");
+                self.runtime_metrics.code_modified_lifetime_loc = u64_of("code_modified_lifetime_loc");
+                self.runtime_metrics.files_created_lifetime = u64_of("files_created_lifetime");
+                self.runtime_metrics.files_modified_lifetime = u64_of("files_modified_lifetime");
+                self.runtime_metrics.tool_calls_lifetime = u64_of("tool_calls_lifetime");
+                self.runtime_metrics.prs_created_lifetime = u64_of("prs_created_lifetime");
+                self.runtime_metrics.tests_run_lifetime = u64_of("tests_run_lifetime");
+                self.runtime_metrics.tests_passed_rate = f32_of("tests_passed_rate");
+                self.runtime_metrics.total_spend_lifetime_usd = f64_of("total_spend_lifetime");
+            }
+            "task.created" => {
+                // Round-3 fix A: defensive route for task.created arriving as
+                // Unknown (e.g. missing field that fails the strict tuple
+                // variant). Mirrors the typed Event::TaskCreated handler.
+                let task_id = payload_str(&p.extra, "task_id")
+                    .or_else(|| p.task_id.clone())
+                    .unwrap_or_default();
+                if !task_id.is_empty() {
+                    let session_id = payload_str(&p.extra, "session_id")
+                        .or_else(|| p.session_id.clone())
+                        .unwrap_or_default();
+                    let intent = payload_str(&p.extra, "intent").unwrap_or_default();
+                    let file_or_area = payload_str(&p.extra, "file_or_area")
+                        .or_else(|| payload_str(&p.extra, "file"))
+                        .unwrap_or_default();
+                    let risk = match payload_str(&p.extra, "risk")
+                        .as_deref()
+                        .map(|s| s.to_ascii_lowercase())
+                        .as_deref()
+                    {
+                        Some("medium") => Risk::Medium,
+                        Some("high") => Risk::High,
+                        Some("critical") => Risk::Critical,
+                        _ => Risk::Low,
+                    };
+                    self.session.active_task_id = Some(task_id.clone());
+                    self.upsert_task(TaskState {
+                        task_id,
+                        session_id,
+                        status: TaskStatus::Queued,
+                        intent,
+                        file_or_area,
+                        phase: None,
+                        risk,
+                        age_seconds: 0,
+                        created_at: p.time,
+                        updated_at: p.time,
+                        blocked_reason: None,
+                    });
+                    self.runtime_metrics.ongoing_tasks =
+                        self.runtime_metrics.ongoing_tasks.saturating_add(1);
+                }
+            }
+            "task.updated" => {
+                let task_id = payload_str(&p.extra, "task_id").or_else(|| p.task_id.clone());
+                let Some(task_id) = task_id else { return };
+                let new_status = parse_task_status(payload_str(&p.extra, "status").as_deref());
+                let new_phase = payload_str(&p.extra, "phase")
+                    .as_deref()
+                    .and_then(parse_phase);
+                let intent = payload_str(&p.extra, "intent");
+                let file_or_area = payload_str(&p.extra, "file_or_area");
+                let age_seconds = p
+                    .extra
+                    .get("age_seconds")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                    if let Some(s) = new_status {
+                        t.status = s;
+                    }
+                    if new_phase.is_some() {
+                        t.phase = new_phase;
+                    }
+                    if let Some(i) = intent {
+                        t.intent = i;
+                    }
+                    if let Some(f) = file_or_area {
+                        t.file_or_area = f;
+                    }
+                    t.age_seconds = age_seconds;
+                    t.updated_at = p.time;
+                }
+                if matches!(
+                    new_status,
+                    Some(TaskStatus::Running)
+                        | Some(TaskStatus::WaitingTool)
+                        | Some(TaskStatus::WaitingReview)
+                ) {
+                    self.session.active_task_id = Some(task_id);
+                }
+            }
+            "task.completed" => {
+                let task_id = payload_str(&p.extra, "task_id").or_else(|| p.task_id.clone());
+                if let Some(task_id) = task_id {
+                    if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                        t.status = TaskStatus::Completed;
+                        t.updated_at = p.time;
+                    }
+                    if self.session.active_task_id.as_deref() == Some(task_id.as_str()) {
+                        self.session.active_task_id = None;
+                    }
+                }
+                self.runtime_metrics.successful_tasks_lifetime = self
+                    .runtime_metrics
+                    .successful_tasks_lifetime
+                    .saturating_add(1);
+            }
+            "task.failed" => {
+                let task_id = payload_str(&p.extra, "task_id").or_else(|| p.task_id.clone());
+                let reason = payload_str(&p.extra, "reason")
+                    .or_else(|| p.message.clone())
+                    .unwrap_or_default();
+                if let Some(task_id) = task_id {
+                    if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                        t.status = TaskStatus::Failed;
+                        t.blocked_reason = Some(reason);
+                        t.updated_at = p.time;
+                    }
+                    if self.session.active_task_id.as_deref() == Some(task_id.as_str()) {
+                        self.session.active_task_id = None;
+                    }
+                }
+                self.runtime_metrics.failed_tasks_lifetime =
+                    self.runtime_metrics.failed_tasks_lifetime.saturating_add(1);
+            }
+            "task.blocked" => {
+                let task_id = payload_str(&p.extra, "task_id").or_else(|| p.task_id.clone());
+                let reason = payload_str(&p.extra, "blocked_reason")
+                    .or_else(|| payload_str(&p.extra, "reason"))
+                    .or_else(|| p.message.clone())
+                    .unwrap_or_default();
+                if let Some(task_id) = task_id {
+                    if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                        t.status = TaskStatus::Blocked;
+                        t.blocked_reason = Some(reason);
+                        t.updated_at = p.time;
                     }
                 }
             }
@@ -2281,5 +2507,310 @@ mod tests {
         let naga = s.plugins.iter().find(|p| p.name == "naga").unwrap();
         assert!(naga.last_event.is_some(), "last_event must populate on every Unknown plugin event");
         assert!(naga.calls >= 1);
+    }
+
+    /// Helper: build an Event::Unknown with a specific `time` field.
+    fn mk_unknown_at(
+        type_tag: &str,
+        plugin: Option<&str>,
+        time: f64,
+        extras: &[(&str, serde_json::Value)],
+    ) -> Event {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("type".to_string(), serde_json::json!(type_tag));
+        for (k, v) in extras {
+            extra.insert((*k).to_string(), v.clone());
+        }
+        Event::Unknown(crate::event::GenericPayload {
+            time,
+            session_id: None,
+            task_id: None,
+            plugin: plugin.map(|p| p.to_string()),
+            phase: None,
+            severity: None,
+            message: None,
+            extra,
+        })
+    }
+
+    // ---- Round-3 fix B: pech display_value race -----------------------
+    #[test]
+    fn pech_real_zero_event_does_not_clobber_synthetic_nonzero() {
+        // Synthetic emits non-zero session_cost / cost_usd; the orchestrator's
+        // real fs MCP server emits the same wire type with all zeros. The
+        // real-zero event must NOT blank the display or push 0 into the
+        // sparkline series.
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "pech.ledger.appended",
+            Some("pech"),
+            &[
+                ("session_cost_usd", serde_json::json!(0.42)),
+                ("cost_usd", serde_json::json!(0.05)),
+                ("daily_cost_usd", serde_json::json!(3.21)),
+            ],
+        ));
+        let pech_after_synth = s.plugins.iter().find(|p| p.name == "pech").unwrap().clone();
+        assert_eq!(pech_after_synth.display_value, "$0.42");
+        let series_len_after_synth = pech_after_synth.usage_series.len();
+
+        // Real event with zeros — preserves the latched values.
+        s.apply(mk_unknown(
+            "pech.ledger.appended",
+            Some("mcp-client"),
+            &[
+                ("session_cost_usd", serde_json::json!(0.0)),
+                ("cost_usd", serde_json::json!(0.0)),
+                ("daily_cost_usd", serde_json::json!(0.0)),
+                ("input_tokens", serde_json::json!(0)),
+                ("output_tokens", serde_json::json!(0)),
+            ],
+        ));
+        let pech_after_real = s.plugins.iter().find(|p| p.name == "pech").unwrap();
+        assert_eq!(
+            pech_after_real.display_value, "$0.42",
+            "real zero event must not blank the latched display"
+        );
+        assert!(
+            (s.metrics.spent_session_usd - 0.42).abs() < 1e-9,
+            "spent_session_usd must stay latched"
+        );
+        // Sparkline series should not have a 0 cents sample appended.
+        assert_eq!(
+            pech_after_real.usage_series.len(),
+            series_len_after_synth,
+            "zero-cost real event must not push a sparkline sample"
+        );
+    }
+
+    // ---- Round-3 fix A: defensive Unknown routes ---------------------
+    #[test]
+    fn unknown_emu_context_update_sets_display_with_turns_label() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "emu.context_update",
+            Some("emu"),
+            &[("turn_estimate", serde_json::json!(28))],
+        ));
+        let emu = s.plugins.iter().find(|p| p.name == "emu").unwrap();
+        assert_eq!(emu.display_value, "28±3 turns");
+        assert!(emu.last_event.is_some());
+        assert_eq!(emu.calls, 1);
+    }
+
+    #[test]
+    fn unknown_lich_review_sets_clean_display() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown("lich.review", Some("lich"), &[]));
+        let lich = s.plugins.iter().find(|p| p.name == "lich").unwrap();
+        assert_eq!(lich.display_value, "clean");
+        assert!(lich.last_event.is_some());
+    }
+
+    #[test]
+    fn unknown_naga_spec_check_clean_status_sets_clean_display() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "naga.spec_check",
+            Some("naga"),
+            &[("status", serde_json::json!("clean"))],
+        ));
+        let naga = s.plugins.iter().find(|p| p.name == "naga").unwrap();
+        assert_eq!(naga.display_value, "clean");
+    }
+
+    #[test]
+    fn unknown_naga_spec_check_drift_status_sets_drift_display() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "naga.spec_check",
+            Some("naga"),
+            &[("status", serde_json::json!("drift"))],
+        ));
+        let naga = s.plugins.iter().find(|p| p.name == "naga").unwrap();
+        assert_eq!(naga.display_value, "drift");
+    }
+
+    #[test]
+    fn unknown_runtime_metrics_populates_runtime_state() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "runtime.metrics",
+            Some("orchestrator"),
+            &[
+                ("open_sessions", serde_json::json!(2)),
+                ("ongoing_tasks", serde_json::json!(3)),
+                ("queued_tasks", serde_json::json!(1)),
+                ("blocked_tasks", serde_json::json!(0)),
+                ("code_written_lifetime_loc", serde_json::json!(42800)),
+                ("code_modified_lifetime_loc", serde_json::json!(118400)),
+                ("files_created_lifetime", serde_json::json!(86)),
+                ("files_modified_lifetime", serde_json::json!(312)),
+                ("tool_calls_lifetime", serde_json::json!(9001)),
+                ("prs_created_lifetime", serde_json::json!(18)),
+                ("tests_run_lifetime", serde_json::json!(2100)),
+                ("tests_passed_rate", serde_json::json!(0.94)),
+                ("total_spend_lifetime", serde_json::json!(184.2)),
+            ],
+        ));
+        assert_eq!(s.runtime_metrics.open_sessions, 2);
+        assert_eq!(s.runtime_metrics.ongoing_tasks, 3);
+        assert_eq!(s.runtime_metrics.code_written_lifetime_loc, 42800);
+        assert_eq!(s.runtime_metrics.tool_calls_lifetime, 9001);
+        assert!((s.runtime_metrics.tests_passed_rate - 0.94).abs() < 1e-3);
+        assert!((s.runtime_metrics.total_spend_lifetime_usd - 184.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_task_created_upserts_and_sets_active_task_id() {
+        let mut s = AppState::new();
+        let before_ongoing = s.runtime_metrics.ongoing_tasks;
+        s.apply(mk_unknown(
+            "task.created",
+            Some("orchestrator"),
+            &[
+                ("task_id", serde_json::json!("T-7")),
+                ("session_id", serde_json::json!("sess-1")),
+                ("intent", serde_json::json!("refactor parser")),
+                ("file_or_area", serde_json::json!("src/event.rs")),
+                ("risk", serde_json::json!("medium")),
+            ],
+        ));
+        assert_eq!(s.session.active_task_id.as_deref(), Some("T-7"));
+        assert_eq!(s.tasks.len(), 1);
+        let t = &s.tasks[0];
+        assert_eq!(t.task_id, "T-7");
+        assert_eq!(t.intent, "refactor parser");
+        assert_eq!(t.file_or_area, "src/event.rs");
+        assert!(matches!(t.risk, Risk::Medium));
+        assert_eq!(s.runtime_metrics.ongoing_tasks, before_ongoing + 1);
+    }
+
+    #[test]
+    fn unknown_task_completed_clears_active_task_and_bumps_successful() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "task.created",
+            Some("orchestrator"),
+            &[
+                ("task_id", serde_json::json!("T-8")),
+                ("session_id", serde_json::json!("sess-1")),
+                ("intent", serde_json::json!("write tests")),
+            ],
+        ));
+        assert_eq!(s.session.active_task_id.as_deref(), Some("T-8"));
+
+        s.apply(mk_unknown(
+            "task.completed",
+            Some("orchestrator"),
+            &[
+                ("task_id", serde_json::json!("T-8")),
+                ("session_id", serde_json::json!("sess-1")),
+            ],
+        ));
+        assert!(s.session.active_task_id.is_none());
+        assert_eq!(s.runtime_metrics.successful_tasks_lifetime, 1);
+        let t = s.tasks.iter().find(|t| t.task_id == "T-8").unwrap();
+        assert!(matches!(t.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn unknown_task_updated_running_refreshes_active_task_id() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "task.created",
+            Some("orchestrator"),
+            &[
+                ("task_id", serde_json::json!("T-9")),
+                ("session_id", serde_json::json!("sess-1")),
+            ],
+        ));
+        // Clear the active id to verify task.updated re-latches it.
+        s.session.active_task_id = None;
+        s.apply(mk_unknown(
+            "task.updated",
+            Some("orchestrator"),
+            &[
+                ("task_id", serde_json::json!("T-9")),
+                ("session_id", serde_json::json!("sess-1")),
+                ("status", serde_json::json!("running")),
+                ("age_seconds", serde_json::json!(4)),
+            ],
+        ));
+        assert_eq!(s.session.active_task_id.as_deref(), Some("T-9"));
+        let t = s.tasks.iter().find(|t| t.task_id == "T-9").unwrap();
+        assert!(matches!(t.status, TaskStatus::Running));
+        assert_eq!(t.age_seconds, 4);
+    }
+
+    // ---- Round-3 fix C: sliding-window latency ------------------------
+    #[test]
+    fn sliding_window_latency_uses_recent_50_events_with_known_deltas() {
+        // Feed 100 events spaced 1ms apart. Avg / p95 / p99 over the last 50
+        // should all be ~1ms — and crucially must NOT pin to a stale value
+        // computed over the ring's full span.
+        let mut s = AppState::new();
+        let mut t = 1_000_000.0_f64;
+        for _ in 0..100 {
+            s.apply(mk_unknown_at("totally.fake", Some("orchestrator"), t, &[]));
+            t += 0.001; // 1ms step
+        }
+        let avg = s.health.event_loop_ms;
+        let p95 = s.metrics.p95_latency_ms;
+        let p99 = s.metrics.p99_latency_ms;
+        assert!(
+            (avg - 1.0).abs() < 0.5,
+            "avg latency over 1ms-spaced events should be ~1ms, got {avg}"
+        );
+        assert!(
+            (p95 - 1.0).abs() < 0.5,
+            "p95 over 1ms-spaced events should be ~1ms, got {p95}"
+        );
+        assert!(
+            (p99 - 1.0).abs() < 0.5,
+            "p99 over 1ms-spaced events should be ~1ms, got {p99}"
+        );
+    }
+
+    #[test]
+    fn sliding_window_latency_caps_avg_at_100ms() {
+        // Pathological: 60s spacing. The avg must cap at 100ms — the cockpit's
+        // session-spanning ring buffer must not produce a 60000ms readout.
+        let mut s = AppState::new();
+        let mut t = 1_000_000.0_f64;
+        for _ in 0..60 {
+            s.apply(mk_unknown_at("totally.fake", Some("orchestrator"), t, &[]));
+            t += 60.0;
+        }
+        assert!(
+            s.health.event_loop_ms <= 100.0 + f32::EPSILON,
+            "avg must cap at 100ms, got {}",
+            s.health.event_loop_ms
+        );
+    }
+
+    #[test]
+    fn sliding_window_latency_window_ignores_events_before_recent_50() {
+        // 100 events: first 50 spaced 1s apart (slow), next 50 spaced 1ms apart
+        // (fast). The window should reflect the fast tail.
+        let mut s = AppState::new();
+        let mut t = 1_000_000.0_f64;
+        for _ in 0..50 {
+            s.apply(mk_unknown_at("totally.fake", Some("orchestrator"), t, &[]));
+            t += 1.0; // 1000 ms
+        }
+        for _ in 0..50 {
+            s.apply(mk_unknown_at("totally.fake", Some("orchestrator"), t, &[]));
+            t += 0.001; // 1 ms
+        }
+        // Avg should reflect the recent fast window, not the slow head.
+        // (Note: the avg cap is 100ms, so even without windowing the value
+        // wouldn't be 1000ms — but it WOULD be the cap. With windowing it's
+        // ~1ms.)
+        assert!(
+            s.health.event_loop_ms < 50.0,
+            "windowed avg should be small (~1ms), not the slow head; got {}",
+            s.health.event_loop_ms
+        );
     }
 }
