@@ -38,8 +38,17 @@ import {
 } from 'enchanter';
 import { spawn } from 'node:child_process';
 
-// Spawn any MCP-spec server (filesystem, github, postgres, ...)
-const server = spawn('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/sandbox']);
+// Spawn any MCP-spec server (filesystem, github, postgres, ...).
+// Pin the version — DO NOT use `npx -y` in production. The `-y` flag
+// auto-installs whatever the registry currently resolves at fetch time,
+// a known supply-chain attack surface. Install once with an exact version,
+// then resolve via require.resolve so the path is locked to your lockfile.
+//
+//   npm install @modelcontextprotocol/server-filesystem@<exact-version>
+//
+// (See hydra/plugins/package-gate for pre-install advisory checks.)
+const serverPath = require.resolve('@modelcontextprotocol/server-filesystem/dist/index.js');
+const server = spawn('node', [serverPath, '/path/to/sandbox']);
 const transport = new StdioTransport(server.stdout!, server.stdin!);
 
 const client = new McpClient({

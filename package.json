@@ -1,6 +1,6 @@
 {
   "name": "enchanter",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "MCP client with hybrid orchestrator + event-bus architecture. Integrates 10 capability plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow) on every outbound tool call.",
   "keywords": [
     "mcp",
@@ -61,12 +61,12 @@
     "release:prep": "tsx scripts/release-prep.ts"
   },
   "dependencies": {
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-node": "^0.55.0",
-    "node-notifier": "^10.0.1",
-    "undici": "^7.0.0",
-    "ws": "^8.20.0",
-    "zod": "^3.23.0"
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/sdk-node": "0.55.0",
+    "node-notifier": "10.0.1",
+    "undici": "7.25.0",
+    "ws": "8.20.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
