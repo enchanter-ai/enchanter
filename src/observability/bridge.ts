@@ -82,7 +82,7 @@ export function toWireRecord(event: EnchantedEvent): Record<string, unknown> {
   ) {
     record.session_id = event.session_id;
   }
-  if (record.phase === undefined && typeof event.phase === 'string' && event.phase !== '') {
+  if (record.phase === undefined && typeof event.phase === 'string' && (event.phase as string).length > 0) {
     record.phase = event.phase;
   }
   if (record.plugin === undefined && typeof event.source === 'string' && event.source !== '') {
