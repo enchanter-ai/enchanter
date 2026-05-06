@@ -729,9 +729,9 @@ fn render_events_panel(frame: &mut Frame, area: Rect, app: &AppState) {
 
     // Reserve room for fixed columns + spacing; the rest goes to Details so
     // we can truncate that column with ".." rather than letting ratatui clip.
-    // Fixed widths: 9+10+7+22+13+9+8+9 = 87. Spacing: 8 gaps @ 1 = 8.
-    // Box borders: 2. Total fixed: 97.
-    let detail_max = (area.width as usize).saturating_sub(97).max(8);
+    // Fixed widths: 9+10+7+26+13+9+8+9 = 91. Spacing: 8 gaps @ 1 = 8.
+    // Box borders: 2. Total fixed: 101.
+    let detail_max = (area.width as usize).saturating_sub(101).max(8);
 
     // Baseline for event-time formatting: prefer the earliest Unix-epoch event
     // in the buffer (so the column starts from "00:00.000" at the moment the
@@ -752,7 +752,7 @@ fn render_events_panel(frame: &mut Frame, area: Rect, app: &AppState) {
             Constraint::Length(9),  // time
             Constraint::Length(10), // source
             Constraint::Length(7),  // task (6 chars + 1 pad)
-            Constraint::Length(22), // type
+            Constraint::Length(26), // type
             Constraint::Length(13), // phase
             Constraint::Length(9),  // severity
             Constraint::Length(8),  // cost
@@ -837,17 +837,46 @@ fn event_type_color(type_tag: &str) -> Color {
     }
 }
 
+/// Format a USD cost value with cents-or-fractional precision: under $0.01
+/// shows 4 decimals so sub-cent ledger entries are visible (`$0.0042`),
+/// otherwise standard 2 decimals (`$0.42`). Used by the events table Cost
+/// column where individual ledger appendages can be a fraction of a cent.
+fn fmt_cost_cell(v: f64) -> String {
+    if v.abs() < 0.01 {
+        format!("${:.4}", v)
+    } else {
+        format!("${:.2}", v)
+    }
+}
+
 /// Pull a per-event cost in USD where the event carries one. PechLedger has
-/// it as a typed field; everything else may stash `cost_usd` in the generic
-/// payload's `extra` map. Returns "-" when neither applies.
+/// it as a typed field; Unknown variants (e.g. `pech.ledger.appended`)
+/// stash `cost_usd` in the flattened extras. Also handles a nested
+/// `payload.cost_usd` shape for events the bridge wraps. Returns "-"
+/// when no real cost is present.
 fn event_cost(ev: &Event) -> String {
     if let Event::PechLedger { payload, .. } = ev {
-        return fmt_money(payload.cost_usd);
+        if payload.cost_usd.abs() > 0.0 {
+            return fmt_cost_cell(payload.cost_usd);
+        }
+        return "-".to_string();
     }
     if let Some(p) = generic_payload(ev) {
+        // Top-level extras (the bridge's flattened wire shape).
         if let Some(v) = p.extra.get("cost_usd").and_then(|v| v.as_f64()) {
             if v.abs() > 0.0 {
-                return fmt_money(v);
+                return fmt_cost_cell(v);
+            }
+        }
+        // Nested payload.cost_usd for events that wrap a payload object.
+        if let Some(v) = p
+            .extra
+            .get("payload")
+            .and_then(|v| v.get("cost_usd"))
+            .and_then(|v| v.as_f64())
+        {
+            if v.abs() > 0.0 {
+                return fmt_cost_cell(v);
             }
         }
     }
@@ -855,11 +884,16 @@ fn event_cost(ev: &Event) -> String {
 }
 
 /// Pull a per-event duration in milliseconds out of the generic payload's
-/// extras (`duration_ms` is the convention). Returns "-" when absent.
+/// extras. The wire convention is `duration_ms` for tool.result-style
+/// events, `elapsed_ms` for lifecycle.* events (per /tmp/live.jsonl
+/// samples), and `phase_duration_ms` for some phase-scoped events.
+/// Returns "-" when none of the keys is present.
 fn event_duration(ev: &Event) -> String {
     if let Some(p) = generic_payload(ev) {
-        if let Some(v) = p.extra.get("duration_ms").and_then(|v| v.as_f64()) {
-            return format!("{} ms", v as i64);
+        for key in ["duration_ms", "elapsed_ms", "phase_duration_ms"] {
+            if let Some(v) = p.extra.get(key).and_then(|v| v.as_f64()) {
+                return format!("{} ms", v as i64);
+            }
         }
     }
     "-".to_string()
@@ -900,6 +934,11 @@ fn generic_payload(ev: &Event) -> Option<&crate::event::GenericPayload> {
         | Event::TestPassed(p)
         | Event::TestFailed(p)
         | Event::PrCreated(p) => Some(p),
+        // Unknown is the live wire's unmodeled-but-flattened catch-all
+        // (`lifecycle.*`, `pech.ledger.appended`, etc.). It carries the
+        // same `extras` map the typed-tuple variants have, so cost/
+        // duration extraction must consult it too.
+        Event::Unknown(p) => Some(p),
         _ => None,
     }
 }
@@ -1569,6 +1608,96 @@ mod tests {
             plugin: None,
         };
         assert_eq!(event_detail(&ev), "$0.0042 in/1200/out/380");
+    }
+
+    #[test]
+    fn event_cost_extracts_for_unknown_pech_ledger() {
+        // Round-3 fix #2: an Event::Unknown carrying a wire-side
+        // pech.ledger.appended with a top-level cost_usd must render the
+        // formatted cost, not "-".
+        use crate::event::GenericPayload;
+        use std::collections::BTreeMap;
+        let mut extra = BTreeMap::new();
+        extra.insert("type".into(), serde_json::json!("pech.ledger.appended"));
+        extra.insert("cost_usd".into(), serde_json::json!(0.0042));
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0,
+            session_id: None,
+            task_id: None,
+            plugin: None,
+            phase: None,
+            severity: None,
+            message: None,
+            extra,
+        });
+        assert_eq!(event_cost(&ev), "$0.0042");
+
+        // Larger-than-cent value uses 2-decimal cents formatting.
+        let mut extra = BTreeMap::new();
+        extra.insert("cost_usd".into(), serde_json::json!(1.23));
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0, session_id: None, task_id: None, plugin: None,
+            phase: None, severity: None, message: None, extra,
+        });
+        assert_eq!(event_cost(&ev), "$1.23");
+
+        // Zero cost still renders "-" (no signal).
+        let mut extra = BTreeMap::new();
+        extra.insert("cost_usd".into(), serde_json::json!(0.0));
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0, session_id: None, task_id: None, plugin: None,
+            phase: None, severity: None, message: None, extra,
+        });
+        assert_eq!(event_cost(&ev), "-");
+    }
+
+    #[test]
+    fn event_duration_extracts_for_lifecycle() {
+        // Round-3 fix #3: lifecycle.* events carry `elapsed_ms` per the
+        // wire samples in /tmp/live.jsonl. Render it as "<N> ms".
+        use crate::event::GenericPayload;
+        use std::collections::BTreeMap;
+        let mut extra = BTreeMap::new();
+        extra.insert("type".into(), serde_json::json!("lifecycle.dispatch"));
+        extra.insert("elapsed_ms".into(), serde_json::json!(27));
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0, session_id: None, task_id: None, plugin: None,
+            phase: None, severity: None, message: None, extra,
+        });
+        assert_eq!(event_duration(&ev), "27 ms");
+
+        // duration_ms (tool.result convention) also works.
+        let mut extra = BTreeMap::new();
+        extra.insert("duration_ms".into(), serde_json::json!(150));
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0, session_id: None, task_id: None, plugin: None,
+            phase: None, severity: None, message: None, extra,
+        });
+        assert_eq!(event_duration(&ev), "150 ms");
+
+        // Absent → "-".
+        let ev = Event::Unknown(GenericPayload {
+            time: 0.0, session_id: None, task_id: None, plugin: None,
+            phase: None, severity: None, message: None,
+            extra: BTreeMap::new(),
+        });
+        assert_eq!(event_duration(&ev), "-");
+    }
+
+    #[test]
+    fn type_column_width_accommodates_lifecycle_cross_session() {
+        // Round-3 fix #1: the Type column width (now 26) must hold the
+        // longest lifecycle.* tag verbatim — no truncation.
+        let tag = "lifecycle.cross-session";
+        assert_eq!(tag.chars().count(), 23);
+        assert!(
+            tag.chars().count() <= 26,
+            "Type column width 26 must fit '{tag}' ({} chars)",
+            tag.chars().count()
+        );
+        // post-response is the next-longest at 22 chars; also fits.
+        let tag2 = "lifecycle.post-response";
+        assert!(tag2.chars().count() <= 26);
     }
 
     #[test]
