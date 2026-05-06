@@ -34,8 +34,31 @@ import { djinnAdapter } from '../src/plugins/djinn.adapter.js';
 import { emuAdapter } from '../src/plugins/emu.adapter.js';
 import { gorgonAdapter } from '../src/plugins/gorgon.adapter.js';
 import { SecurityVetoError } from '../src/orchestration/lifecycle.js';
+import { Bridge } from '../src/observability/bridge.js';
+import {
+  parseBridgeEnv,
+  makeSinkFromEnv,
+} from '../src/observability/bridge-config.js';
 
 const DIVIDER = '─'.repeat(72);
+
+// When ENCHANTER_BRIDGE=stdout, the JSONL wire owns process.stdout — route
+// all human-readable output (banners, info lines, child stderr) to stderr so
+// the inspector sees a pristine event stream. Achieved by monkey-patching
+// console.log/info/warn at startup so we don't have to touch every call site.
+const BRIDGE_SPEC = parseBridgeEnv(process.env.ENCHANTER_BRIDGE);
+const STDOUT_OWNED_BY_BRIDGE = BRIDGE_SPEC.kind === 'stdout';
+if (STDOUT_OWNED_BY_BRIDGE) {
+  const writeErr = (...args: unknown[]) => {
+    const line = args
+      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
+      .join(' ');
+    process.stderr.write(line + '\n');
+  };
+  console.log = writeErr;
+  console.info = writeErr;
+  console.warn = writeErr;
+}
 
 function banner(title: string): void {
   console.log('\n' + DIVIDER);
@@ -103,6 +126,13 @@ async function main(): Promise<void> {
       gorgonAdapter,
     ],
   });
+
+  // Bridge: when ENCHANTER_BRIDGE is set, forward every bus event as JSONL
+  // to a sink (stdout/file/tcp). Default off — unset env preserves the
+  // existing standalone-script behavior.
+  const bridgeSink = makeSinkFromEnv(BRIDGE_SPEC);
+  const bridge = bridgeSink ? new Bridge(client.bus, bridgeSink) : null;
+  bridge?.start();
 
   try {
     // 4. initialize ──────────────────────────────────────────────────────────
@@ -194,6 +224,7 @@ async function main(): Promise<void> {
 
     banner('All phases complete — Enchanter v0.2 verified live ✓');
   } finally {
+    await bridge?.stop();
     client.shutdown();
     proc.kill();
     rmSync(sandbox, { recursive: true, force: true });
