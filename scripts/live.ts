@@ -225,6 +225,185 @@ async function main(): Promise<void> {
     }
 
     banner('All phases complete — Enchanter v0.2 verified live ✓');
+
+    // ---------------------------------------------------------------------
+    // CONTINUOUS LOOP — keeps every cockpit panel animated until Ctrl-C.
+    // Cycles through varied scenarios so plugins keep firing, runtime
+    // metrics keep growing, tasks lifecycle through created→updated→
+    // completed, and security counters tick on the periodic synthetic
+    // attack. Bridge stays attached, so each event reaches the inspector.
+    // ---------------------------------------------------------------------
+    let stop = false;
+    const stopHandler = () => {
+      stop = true;
+    };
+    process.once('SIGINT', stopHandler);
+    process.once('SIGTERM', stopHandler);
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const sample = <T>(xs: readonly T[]): T => xs[Math.floor(Math.random() * xs.length)];
+
+    banner('Continuous mode — cockpit will keep animating. Ctrl-C to exit.');
+
+    let iter = 0;
+    let taskCounter = 104;
+    let totalCost = ledger.reduce((acc, e) => acc + (e.input_tokens + e.output_tokens) * 0.000003, 0);
+    let totalTokens = ledger.reduce((acc, e) => acc + e.input_tokens + e.output_tokens, 0);
+    let totalToolCalls = events.filter((e) => e.topic.startsWith('mcp.tool.call')).length;
+    const sessionId = `live-${Date.now()}`;
+
+    while (!stop) {
+      iter += 1;
+
+      // Rotate through scenarios so every plugin lights up over time.
+      const scenario = iter % 7;
+
+      switch (scenario) {
+        case 0: {
+          // Real benign tool call — full lifecycle fires
+          await client.callTool('list_directory', { path: sandbox }).catch(() => undefined);
+          totalToolCalls += 1;
+          break;
+        }
+        case 1: {
+          // Real read with secret-masking — exercises hydra post-response
+          await client.callTool('read_file', { path: samplePath }).catch(() => undefined);
+          totalToolCalls += 1;
+          break;
+        }
+        case 2: {
+          // Pech ledger growth (synthetic — most direct way to flex pech UI)
+          const cost = 0.0008 + Math.random() * 0.004;
+          const inTok = 200 + Math.floor(Math.random() * 800);
+          const outTok = 80 + Math.floor(Math.random() * 320);
+          totalCost += cost;
+          totalTokens += inTok + outTok;
+          await client.bus.publish('pech.ledger.appended', {
+            phase: 'post-response',
+            source: 'pech',
+            payload: {
+              cost_usd: cost,
+              session_cost_usd: totalCost,
+              daily_cost_usd: totalCost,
+              input_tokens: inTok,
+              output_tokens: outTok,
+            },
+          });
+          break;
+        }
+        case 3: {
+          // Plugin observation events — emu, crow, djinn, gorgon, naga
+          await client.bus.publish('emu.context_update', {
+            phase: 'pre-dispatch',
+            source: 'emu',
+            payload: { context_size: 12000 + iter * 50, turn_estimate: 25 + Math.floor(iter / 4) },
+          });
+          await client.bus.publish('crow.trust.scored', {
+            phase: 'trust-gate',
+            source: 'crow',
+            payload: {
+              server_id: 'fs',
+              tool_name: sample(['list_directory', 'read_file', 'write_file']),
+              posterior_mean: 0.5 + Math.random() * 0.4,
+              entropy: Math.random() * 0.3,
+            },
+          });
+          await client.bus.publish('djinn.drift.observed', {
+            phase: 'post-session',
+            source: 'djinn',
+            payload: { drift: Math.random() * 0.15, intent: 'demo session' },
+          });
+          await client.bus.publish('gorgon.hotspot', {
+            phase: 'cross-session',
+            source: 'gorgon',
+            payload: { file: sample(['router.ts', 'auth.ts', 'billing.ts']), heat: Math.random() },
+          });
+          await client.bus.publish('naga.spec_check', {
+            phase: 'post-response',
+            source: 'naga',
+            payload: { file: 'router.ts', drift: 0, status: 'clean' },
+          });
+          break;
+        }
+        case 4: {
+          // Task lifecycle — task.created → updated → completed
+          const tid = `T-${taskCounter}`;
+          taskCounter += 1;
+          await client.bus.publish('task.created', {
+            phase: 'anchor',
+            source: 'orchestrator',
+            payload: {
+              task_id: tid,
+              session_id: sessionId,
+              intent: sample(['refactor router', 'add tests', 'fix auth bug', 'profile pech']),
+              file_or_area: sample(['router.ts', 'auth.ts', 'billing.ts']),
+              risk: sample(['low', 'medium', 'low']),
+            },
+          });
+          await sleep(400);
+          if (stop) break;
+          await client.bus.publish('task.updated', {
+            phase: 'dispatch',
+            source: 'orchestrator',
+            payload: {
+              task_id: tid,
+              session_id: sessionId,
+              status: 'running',
+              age_seconds: 4,
+            },
+          });
+          await sleep(600);
+          if (stop) break;
+          await client.bus.publish('task.completed', {
+            phase: 'post-session',
+            source: 'orchestrator',
+            payload: { task_id: tid, session_id: sessionId, age_seconds: 10 },
+          });
+          break;
+        }
+        case 5: {
+          // Synthetic veto — flexes hydra + Security counter
+          if (iter % 14 === 5) {
+            await client.callTool('execute', { cmd: 'rm -rf /' }).catch(() => undefined);
+          } else {
+            // Lich review on a real tool result
+            await client.bus.publish('lich.review', {
+              phase: 'post-response',
+              source: 'lich',
+              payload: { reviewed: true, sandbox_depth: 2, status: 'clean' },
+            });
+          }
+          break;
+        }
+        case 6: {
+          // Runtime metrics heartbeat — keeps RUNTIME box growing
+          await client.bus.publish('runtime.metrics', {
+            phase: 'cross-session',
+            source: 'orchestrator',
+            payload: {
+              open_sessions: 1,
+              ongoing_tasks: 1 + (iter % 3),
+              queued_tasks: iter % 2,
+              blocked_tasks: 0,
+              code_written_lifetime_loc: 42800 + iter * 12,
+              code_modified_lifetime_loc: 118400 + iter * 30,
+              files_created_lifetime: 86 + Math.floor(iter / 7),
+              files_modified_lifetime: 312 + Math.floor(iter / 3),
+              tool_calls_lifetime: totalToolCalls,
+              prs_created_lifetime: 18,
+              tests_run_lifetime: 2100 + iter,
+              tests_passed_rate: 0.94 + Math.random() * 0.04,
+              total_spend_lifetime: 184.2 + totalCost,
+            },
+          });
+          break;
+        }
+      }
+
+      await sleep(900 + Math.random() * 700);
+    }
+
+    process.removeListener('SIGINT', stopHandler);
+    process.removeListener('SIGTERM', stopHandler);
   } finally {
     await bridge?.stop();
     client.shutdown();
