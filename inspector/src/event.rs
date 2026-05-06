@@ -736,10 +736,27 @@ mod tests {
     }
 
     #[test]
-    fn unknown_event_type_errors() {
-        let json = r#"{"type": "totally.fake", "time": 1.0}"#;
-        let result = parse_line(json);
-        assert!(result.is_err(), "expected unknown discriminant to error");
+    fn unknown_event_type_falls_back_to_unknown_variant() {
+        // The producer (TS bridge) emits many wire-side type names that the
+        // strict Rust enum doesn't enumerate (`lifecycle.anchor`,
+        // `mcp.tool.call.requested`, `crow.trust.scored`, etc.). parse_line
+        // must surface them as Event::Unknown(GenericPayload) — not error —
+        // so the cockpit's events table and metrics keep moving.
+        let json = r#"{"type": "totally.fake", "time": 1.0, "plugin": "demo"}"#;
+        let evt = parse_line(json).expect("expected fallback to Event::Unknown");
+        match &evt {
+            Event::Unknown(p) => {
+                assert!((p.time - 1.0).abs() < f64::EPSILON);
+                assert_eq!(p.plugin.as_deref(), Some("demo"));
+                // The original `type` field round-trips through `extra` so
+                // downstream routing can dispatch on the wire-side tag.
+                assert_eq!(
+                    p.extra.get("type").and_then(|v| v.as_str()),
+                    Some("totally.fake")
+                );
+            }
+            other => panic!("expected Event::Unknown, got {:?}", other.type_tag()),
+        }
     }
 
     #[test]

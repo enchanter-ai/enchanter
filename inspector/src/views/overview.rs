@@ -98,6 +98,24 @@ fn render_top_bar(frame: &mut Frame, area: Rect, app: &AppState) {
     if app.demo_mode {
         left_spans.push(Span::styled(" \u{2014} DEMO", Style::default().fg(theme::TEXT_DIM)));
     }
+    // Loading indicator: when the runtime hasn't emitted any events yet, show
+    // a pulsing "waiting for runtime…" pill so the user sees something is
+    // happening. Drops as soon as the first event lands.
+    if app.events.is_empty() && !app.demo_mode {
+        let dots = match app.tick % 3 {
+            0 => ".",
+            1 => "..",
+            _ => "...",
+        };
+        left_spans.push(Span::styled(
+            " \u{2014} ".to_string(),
+            Style::default().fg(theme::TEXT_DIM),
+        ));
+        left_spans.push(Span::styled(
+            format!("waiting for runtime{dots}"),
+            Style::default().fg(theme::TEXT_DIM),
+        ));
+    }
 
     // Shortcuts text — single string so the right column can be sized to fit.
     let shortcut_text = "q quit \u{00b7} / filter \u{00b7} p pause \u{00b7} s sort \u{00b7} ? help";
@@ -461,7 +479,7 @@ fn render_system_health(frame: &mut Frame, area: Rect, app: &AppState) {
     let block = widgets::panel_block_with_color("SYSTEM HEALTH", false, theme::BORDER_HEALTH);
     let h = &app.health;
     let ring_pct = (app.events.len() as f32 / crate::state::EVENT_RING_CAPACITY as f32) * 100.0;
-    let log_kb = crate::state::tracing_log_size_kb();
+    let log_bytes = crate::state::tracing_log_size_bytes();
     let active_tasks = app
         .tasks
         .iter()
@@ -482,7 +500,7 @@ fn render_system_health(frame: &mut Frame, area: Rect, app: &AppState) {
         kv_row("Network", &format!("{:.0} Mbps", h.network_mbps)),
         kv_row("Ring buffer", &format!("{:.0} %", ring_pct)),
         kv_row("Inspector PID", &format!("{pid}")),
-        kv_row("Tracing log", &fmt_log_size(log_kb)),
+        kv_row("Tracing log", &fmt_log_size(log_bytes)),
         kv_row("Active tasks", &format!("{active_tasks}")),
         kv_row("Plugin errors", &fmt_count_short(plugin_errors_total)),
     ];
@@ -495,15 +513,25 @@ fn render_system_health(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(table, area);
 }
 
-/// Format a tracing-log size: KB under a meg, MB above.
-fn fmt_log_size(kb: u64) -> String {
-    if kb == 0 {
+/// Format a tracing-log size in bytes through a B / KB / MB / GB ladder.
+/// Returns "-" for zero.
+fn fmt_log_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes == 0 {
         "-".to_string()
-    } else if kb < 1024 {
-        format!("{kb} KB")
+    } else if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        let v = (bytes as f64) / KB as f64;
+        format!("{v:.1} KB")
+    } else if bytes < GB {
+        let v = (bytes as f64) / MB as f64;
+        format!("{v:.1} MB")
     } else {
-        let mb = (kb as f64) / 1024.0;
-        format!("{mb:.1} MB")
+        let v = (bytes as f64) / GB as f64;
+        format!("{v:.1} GB")
     }
 }
 
@@ -706,12 +734,17 @@ fn render_events_panel(frame: &mut Frame, area: Rect, app: &AppState) {
     // Box borders: 2. Total fixed: 97.
     let detail_max = (area.width as usize).saturating_sub(97).max(8);
 
+    // Baseline for event-time formatting: prefer the earliest Unix-epoch event
+    // in the buffer (so the column starts from "00:00.000" at the moment the
+    // first event arrived); fall back to app.started_at as a Unix timestamp.
+    let baseline = event_time_baseline(app);
+
     let rows: Vec<Row> = app
         .events
         .iter()
         .rev()
         .take(take)
-        .map(|ev| event_row(ev, detail_max))
+        .map(|ev| event_row(ev, detail_max, baseline))
         .collect();
 
     let table = Table::new(
@@ -735,8 +768,8 @@ fn render_events_panel(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(table, area);
 }
 
-fn event_row(ev: &Event, detail_max: usize) -> Row<'_> {
-    let time = format!("{:<9.3}", ev.time());
+fn event_row(ev: &Event, detail_max: usize, baseline: f64) -> Row<'_> {
+    let time = fmt_event_time(ev.time(), baseline);
     let source = ev.plugin().map(str::to_string).unwrap_or_else(|| {
         ev.type_tag()
             .split('.')
@@ -1169,6 +1202,55 @@ fn fmt_age_seconds(secs: u64) -> String {
     }
 }
 
+/// Pick the baseline timestamp the RECENT EVENTS time column counts from.
+/// Returns the smallest Unix-epoch event-time in the ring; falls back to
+/// `app.started_at` as Unix seconds when nothing in the ring looks epoch-y;
+/// returns 0.0 only when no events have arrived AND the started_at clock is
+/// unset (effectively never). 0.0 baseline tells `fmt_event_time` to treat
+/// the value as already-relative.
+fn event_time_baseline(app: &AppState) -> f64 {
+    // Min over events whose time looks like an absolute Unix epoch
+    // (>= 1e9). Anything smaller is treated as already-relative.
+    let min_epoch = app
+        .events
+        .iter()
+        .map(|e| e.time())
+        .filter(|t| *t >= 1e9)
+        .fold(f64::INFINITY, f64::min);
+    if min_epoch.is_finite() {
+        return min_epoch;
+    }
+    // Fallback: process start as Unix seconds.
+    app.started_at.timestamp() as f64
+}
+
+/// Format an event-time value into a fixed-width column string.
+///
+/// Detects Unix-epoch values by magnitude (>= 1e9) and formats relative to
+/// `baseline`; smaller values are treated as already-relative seconds. Output
+/// is `MM:SS.sss` for sub-hour and `H:MM:SS` past an hour. Hard-capped at 8
+/// chars wide so the time column never blows out.
+fn fmt_event_time(t: f64, baseline: f64) -> String {
+    let rel = if t >= 1e9 && baseline >= 1e9 {
+        (t - baseline).max(0.0)
+    } else {
+        t.max(0.0)
+    };
+    if rel < 3600.0 {
+        let total_ms = (rel * 1000.0) as u64;
+        let mm = total_ms / 60_000;
+        let ss = (total_ms / 1000) % 60;
+        let ms = total_ms % 1000;
+        format!("{mm:02}:{ss:02}.{ms:03}")
+    } else {
+        let total_s = rel as u64;
+        let h = total_s / 3600;
+        let m = (total_s % 3600) / 60;
+        let s = total_s % 60;
+        format!("{h}:{m:02}:{s:02}")
+    }
+}
+
 /// Format a non-negative seconds delta as a compact "Xs ago" / "Xm ago".
 /// Negative deltas (clock skew) and missing values produce "-".
 fn fmt_relative_seconds(delta: f64) -> String {
@@ -1262,10 +1344,45 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("abcdef", 2), "ab");
     }
 
-#[test]
+    #[test]
     fn fmt_log_size_units() {
         assert_eq!(fmt_log_size(0), "-");
-        assert_eq!(fmt_log_size(512), "512 KB");
-        assert_eq!(fmt_log_size(2048), "2.0 MB");
+        assert_eq!(fmt_log_size(512), "512 B");
+        assert_eq!(fmt_log_size(2 * 1024), "2.0 KB");
+        assert_eq!(fmt_log_size(5 * 1024 * 1024), "5.0 MB");
+        // The original bug: a 35 GB-sounding number must NOT silently appear
+        // for a tens-of-MB log. Synthesize 35 MB and confirm we render
+        // "35.0 MB", not "35840 MB" or any GB-scale figure.
+        assert_eq!(fmt_log_size(35 * 1024 * 1024), "35.0 MB");
+        assert_eq!(fmt_log_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn fmt_event_time_handles_unix_epoch() {
+        // Real wire data: Unix epoch ~1.78e9, baseline some seconds earlier.
+        let baseline = 1_778_086_945.0;
+        let t = baseline + 12.345;
+        assert_eq!(fmt_event_time(t, baseline), "00:12.345");
+        // Past an hour: H:MM:SS form.
+        let t2 = baseline + 3.0 * 3600.0 + 5.0 * 60.0 + 7.0;
+        assert_eq!(fmt_event_time(t2, baseline), "3:05:07");
+    }
+
+    #[test]
+    fn fmt_event_time_handles_relative_seconds() {
+        // Demo data: small relative seconds, baseline doesn't matter — value
+        // is treated as already-relative when t < 1e9.
+        assert_eq!(fmt_event_time(0.0, 0.0), "00:00.000");
+        assert_eq!(fmt_event_time(45.5, 0.0), "00:45.500");
+        assert_eq!(fmt_event_time(125.0, 0.0), "02:05.000");
+    }
+
+    #[test]
+    fn fmt_event_time_clamps_negative_skew() {
+        // Event-time before baseline (clock skew) clamps to 00:00.000 rather
+        // than printing a negative or wrapped-u64 value.
+        let baseline = 1_778_086_945.0;
+        let t = baseline - 5.0;
+        assert_eq!(fmt_event_time(t, baseline), "00:00.000");
     }
 }

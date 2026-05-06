@@ -37,6 +37,53 @@ fn parse_task_status(s: Option<&str>) -> Option<TaskStatus> {
     }
 }
 
+/// Best-effort "what phase is this event in" extraction off any event shape.
+/// Reads the typed `phase` field where present, otherwise digs into the
+/// generic payload's `phase` slot. Unknown variants carry the field on
+/// `GenericPayload` directly.
+fn generic_phase(ev: &Event) -> Option<String> {
+    use crate::event::Event as E;
+    match ev {
+        E::ToolCall { phase, .. }
+        | E::HydraVeto { phase, .. }
+        | E::PechLedger { phase, .. }
+        | E::RequestApproval { phase, .. } => phase.clone(),
+        E::TaskUpdated { phase, .. } => phase.clone(),
+        E::SessionStarted(p)
+        | E::SessionOpened(p)
+        | E::SessionClosed(p)
+        | E::SessionEnded(p)
+        | E::PhaseEntered(p)
+        | E::PhaseCompleted(p)
+        | E::PluginLoaded(p)
+        | E::PluginHealth(p)
+        | E::ToolResult(p)
+        | E::ToolError(p)
+        | E::SylphVeto(p)
+        | E::CrowTrust(p)
+        | E::DjinnAnchor(p)
+        | E::DjinnDrift(p)
+        | E::GorgonHotspot(p)
+        | E::NagaSpecCheck(p)
+        | E::LichReview(p)
+        | E::EmuContextUpdate(p)
+        | E::TaskCreated(p)
+        | E::TaskStarted(p)
+        | E::TaskBlocked(p)
+        | E::TaskCompleted(p)
+        | E::TaskFailed(p)
+        | E::CodeGenerated(p)
+        | E::FileCreated(p)
+        | E::FileModified(p)
+        | E::TestRun(p)
+        | E::TestPassed(p)
+        | E::TestFailed(p)
+        | E::PrCreated(p)
+        | E::Unknown(p) => p.phase.clone(),
+        E::RuntimeMetrics { .. } | E::CodeModified { .. } => None,
+    }
+}
+
 fn parse_phase(s: &str) -> Option<crate::event::Phase> {
     use crate::event::Phase;
     match s {
@@ -698,11 +745,13 @@ fn first_email_in(s: &str) -> Option<String> {
     None
 }
 
-/// Tracing-log file size in KB. Looks at `~/.cache/enchanter/inspector.log`
-/// (and the Windows-equivalent `%LOCALAPPDATA%\enchanter\inspector.log`),
-/// returns 0 when neither exists or metadata is unreadable. Cheap enough to
-/// call on a tick refresh — pure metadata read, no scan.
-pub fn tracing_log_size_kb() -> u64 {
+/// Tracing-log file size in **bytes**. Looks at `~/.cache/enchanter/inspector.log`
+/// (and the Windows-equivalents `%LOCALAPPDATA%\enchanter\inspector.log`,
+/// `%USERPROFILE%\.cache\enchanter\inspector.log`). Returns 0 when none exist
+/// or metadata is unreadable. Cheap enough to call on a tick refresh — pure
+/// metadata read, no scan. Skips paths that resolve to directories so the
+/// formatter doesn't have to deal with platform-dependent dir-size values.
+pub fn tracing_log_size_bytes() -> u64 {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         candidates.push(
@@ -729,7 +778,9 @@ pub fn tracing_log_size_kb() -> u64 {
     }
     for path in candidates {
         if let Ok(meta) = std::fs::metadata(&path) {
-            return meta.len() / 1024;
+            if meta.is_file() {
+                return meta.len();
+            }
         }
     }
     0
@@ -1001,8 +1052,12 @@ impl AppState {
             } else {
                 n as f64
             };
+            // CPU synthesis: events-per-second normalized against a 100/s
+            // throughput target, capped at 80% so a burst doesn't make the
+            // cockpit lie about being saturated. TODO: replace with real
+            // process-CPU once a tokio-metrics integration lands.
             self.health.cpu_pct =
-                ((events_per_sec as f32 / 100.0).min(1.0) * 100.0).max(0.0);
+                ((events_per_sec as f32 / 100.0).clamp(0.0, 0.8) * 100.0).max(0.0);
 
             // Average interarrival in milliseconds.
             let avg_ms = if n > 1 {
@@ -1450,8 +1505,26 @@ impl AppState {
                 });
             }
 
+            // ---- catch-all for wire-side type names not in the strict
+            //      enum: route Event::Unknown(GenericPayload) by `type` tag
+            //      so the cockpit's lifetime/per-plugin counters move when
+            //      `mcp.tool.*`, `crow.trust.scored`, `lifecycle.*`, etc.
+            //      land on the bus.
+            Event::Unknown(p) => {
+                self.apply_unknown(p);
+            }
+
             // ---- everything else ---------------------------------------
             _ => {}
+        }
+
+        // Refresh `current_phase` from any event that carries a phase string.
+        // Done generically so Unknown variants (lifecycle.*, mcp.tool.*) keep
+        // the phase pipeline indicator current.
+        if let Some(phase_str) = generic_phase(&ev) {
+            if let Some(ph) = parse_phase(&phase_str) {
+                self.session.current_phase = Some(ph);
+            }
         }
 
         // Bump per-plugin last_event timestamp so the overview can render
@@ -1471,6 +1544,156 @@ impl AppState {
         self.push_event(ev);
         self.synthesize_health();
         self.refresh_insights();
+    }
+
+    /// Route an `Event::Unknown` (catch-all for wire-side names not enumerated
+    /// in the strict Rust enum) to the same per-plugin / per-metric updates
+    /// the typed variants get. Reads the original `type` tag from the
+    /// flattened-payload `extra["type"]` field — `parse_line`'s fallback path
+    /// preserves it there. Called by `apply()` so the bump-last_event logic
+    /// downstream still runs.
+    fn apply_unknown(&mut self, p: &crate::event::GenericPayload) {
+        let type_tag = p
+            .extra
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // lifecycle.<phase> — refresh current_phase from the suffix.
+        if let Some(suffix) = type_tag.strip_prefix("lifecycle.") {
+            if let Some(ph) = parse_phase(suffix) {
+                self.session.current_phase = Some(ph);
+            }
+            return;
+        }
+
+        match type_tag {
+            "mcp.tool.call.requested" => {
+                self.runtime_metrics.tool_calls_lifetime =
+                    self.runtime_metrics.tool_calls_lifetime.saturating_add(1);
+            }
+            "mcp.tool.result.received" => {
+                if let Some(name) = p.plugin.as_deref() {
+                    if let Some(idx) = self.plugin_index_by_name(name) {
+                        let plug = &mut self.plugins[idx];
+                        plug.calls = plug.calls.saturating_add(1);
+                        plug.push_usage(plug.calls);
+                    }
+                }
+            }
+            "crow.trust.scored" => {
+                let posterior = p
+                    .extra
+                    .get("posterior_mean")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                self.set_plugin_display("crow", format!("{:.2} trust", posterior));
+                if let Some(idx) = self.plugin_index_by_name("crow") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "djinn.anchor.set" => {
+                self.set_plugin_display("djinn", "anchored".into());
+                if let Some(idx) = self.plugin_index_by_name("djinn") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "djinn.drift.observed" => {
+                if let Some(d) = p
+                    .extra
+                    .get("drift")
+                    .or_else(|| p.extra.get("drift_score"))
+                    .and_then(|v| v.as_f64())
+                {
+                    self.metrics.drift_session_pct = (d * 100.0) as f32;
+                }
+            }
+            "pech.ledger.appended" => {
+                let session_cost = p
+                    .extra
+                    .get("session_cost_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let cost_usd = p
+                    .extra
+                    .get("cost_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let daily = p
+                    .extra
+                    .get("daily_cost_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                self.metrics.spent_session_usd = session_cost;
+                if daily > 0.0 {
+                    self.budgets.daily_spend_usd = daily;
+                }
+                self.set_plugin_display("pech", format!("${:.2}", session_cost));
+                let cents = (cost_usd * 100.0).round().max(0.0) as u64;
+                self.push_plugin_usage("pech", cents);
+                if let Some(idx) = self.plugin_index_by_name("pech") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "hydra.veto.fired" => {
+                self.metrics.security_incidents_session =
+                    self.metrics.security_incidents_session.saturating_add(1);
+                self.runtime_metrics.vetoes_lifetime =
+                    self.runtime_metrics.vetoes_lifetime.saturating_add(1);
+                let n = self.metrics.security_incidents_session;
+                self.set_plugin_display("hydra", format!("{n} vetoes"));
+                if let Some(idx) = self.plugin_index_by_name("hydra") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "hydra.secret.masked" => {
+                if let Some(idx) = self.plugin_index_by_name("hydra") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "sylph.destructive.veto" => {
+                self.metrics.security_incidents_session =
+                    self.metrics.security_incidents_session.saturating_add(1);
+                self.runtime_metrics.vetoes_lifetime =
+                    self.runtime_metrics.vetoes_lifetime.saturating_add(1);
+                let n = self.metrics.security_incidents_session;
+                self.set_plugin_display("sylph", format!("{n} vetoes"));
+                if let Some(idx) = self.plugin_index_by_name("sylph") {
+                    let plug = &mut self.plugins[idx];
+                    plug.calls = plug.calls.saturating_add(1);
+                }
+            }
+            "naga.spec_check"
+            | "lich.review"
+            | "emu.context_update"
+            | "gorgon.hotspot" => {
+                // Strict-enum siblings of the same names already handle the
+                // typed shape; for the wire-format fallthroughs, just bump the
+                // matching plugin's call counter. last_event refresh happens
+                // generically downstream off `ev.plugin()`.
+                if let Some(name) = p.plugin.as_deref() {
+                    if let Some(idx) = self.plugin_index_by_name(name) {
+                        let plug = &mut self.plugins[idx];
+                        plug.calls = plug.calls.saturating_add(1);
+                    }
+                }
+            }
+            _ => {
+                // Anything else — still let the generic plugin-name lookup
+                // bump calls, so unknown wire types still register.
+                if let Some(name) = p.plugin.as_deref() {
+                    if let Some(idx) = self.plugin_index_by_name(name) {
+                        let plug = &mut self.plugins[idx];
+                        plug.calls = plug.calls.saturating_add(1);
+                    }
+                }
+            }
+        }
     }
 
     /// Currently-selected index for the active panel.
@@ -1829,5 +2052,120 @@ mod tests {
         }
         assert_eq!(s.events.len(), EVENT_RING_CAPACITY);
         assert_eq!(s.metrics.events_count, 3000);
+    }
+
+    /// Helper: build an Event::Unknown with the given wire-side type tag and
+    /// arbitrary extras (jammed into the `extra` map).
+    fn mk_unknown(type_tag: &str, plugin: Option<&str>, extras: &[(&str, serde_json::Value)]) -> Event {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("type".to_string(), serde_json::json!(type_tag));
+        for (k, v) in extras {
+            extra.insert((*k).to_string(), v.clone());
+        }
+        Event::Unknown(crate::event::GenericPayload {
+            time: 1_778_086_945.5,
+            session_id: None,
+            task_id: None,
+            plugin: plugin.map(|p| p.to_string()),
+            phase: None,
+            severity: None,
+            message: None,
+            extra,
+        })
+    }
+
+    #[test]
+    fn unknown_mcp_tool_call_bumps_lifetime_tool_calls() {
+        let mut s = AppState::new();
+        let before = s.runtime_metrics.tool_calls_lifetime;
+        s.apply(mk_unknown("mcp.tool.call.requested", Some("mcp-client"), &[]));
+        assert_eq!(s.runtime_metrics.tool_calls_lifetime, before + 1);
+        // Generic events bump events_count too.
+        assert_eq!(s.metrics.events_count, 1);
+    }
+
+    #[test]
+    fn unknown_crow_trust_scored_updates_display_value() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "crow.trust.scored",
+            Some("crow"),
+            &[("posterior_mean", serde_json::json!(0.73))],
+        ));
+        let crow = s.plugins.iter().find(|p| p.name == "crow").unwrap();
+        assert_eq!(crow.display_value, "0.73 trust");
+        assert_eq!(crow.calls, 1);
+        assert!(crow.last_event.is_some(), "last_event must update on Unknown");
+    }
+
+    #[test]
+    fn unknown_djinn_anchor_set_updates_display_and_calls() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown("djinn.anchor.set", Some("djinn"), &[]));
+        let djinn = s.plugins.iter().find(|p| p.name == "djinn").unwrap();
+        assert_eq!(djinn.display_value, "anchored");
+        assert_eq!(djinn.calls, 1);
+    }
+
+    #[test]
+    fn unknown_pech_ledger_appended_updates_spend_and_display() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown(
+            "pech.ledger.appended",
+            Some("pech"),
+            &[
+                ("session_cost_usd", serde_json::json!(0.42)),
+                ("cost_usd", serde_json::json!(0.05)),
+                ("daily_cost_usd", serde_json::json!(3.21)),
+            ],
+        ));
+        assert!((s.metrics.spent_session_usd - 0.42).abs() < 1e-9);
+        assert!((s.budgets.daily_spend_usd - 3.21).abs() < 1e-9);
+        let pech = s.plugins.iter().find(|p| p.name == "pech").unwrap();
+        assert_eq!(pech.display_value, "$0.42");
+    }
+
+    #[test]
+    fn unknown_hydra_veto_fired_increments_security_and_lifetime_vetoes() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown("hydra.veto.fired", Some("hydra"), &[]));
+        assert_eq!(s.metrics.security_incidents_session, 1);
+        assert_eq!(s.runtime_metrics.vetoes_lifetime, 1);
+        let hydra = s.plugins.iter().find(|p| p.name == "hydra").unwrap();
+        assert!(hydra.display_value.contains("vetoes"));
+    }
+
+    #[test]
+    fn unknown_sylph_destructive_veto_increments_security_and_lifetime() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown("sylph.destructive.veto", Some("sylph"), &[]));
+        assert_eq!(s.metrics.security_incidents_session, 1);
+        assert_eq!(s.runtime_metrics.vetoes_lifetime, 1);
+    }
+
+    #[test]
+    fn unknown_lifecycle_dispatch_sets_current_phase() {
+        let mut s = AppState::new();
+        assert!(s.session.current_phase.is_none());
+        s.apply(mk_unknown("lifecycle.dispatch", Some("orchestrator"), &[]));
+        assert_eq!(s.session.current_phase, Some(crate::event::Phase::Dispatch));
+    }
+
+    #[test]
+    fn unknown_lifecycle_trust_gate_sets_current_phase() {
+        let mut s = AppState::new();
+        s.apply(mk_unknown("lifecycle.trust-gate", Some("orchestrator"), &[]));
+        assert_eq!(s.session.current_phase, Some(crate::event::Phase::TrustGate));
+    }
+
+    #[test]
+    fn unknown_event_with_plugin_refreshes_last_event() {
+        let mut s = AppState::new();
+        // Pick an arbitrary unknown wire type that goes through the catch-all
+        // arm; the post-apply block must still refresh last_event.
+        s.apply(mk_unknown("naga.spec_check", Some("naga"), &[]));
+        let naga = s.plugins.iter().find(|p| p.name == "naga").unwrap();
+        assert!(naga.last_event.is_some(), "last_event must populate on every Unknown plugin event");
+        assert!(naga.calls >= 1);
     }
 }
