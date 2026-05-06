@@ -2,6 +2,29 @@
 
 All notable changes to Enchanter are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-06
+
+Three v0.5 carry-overs from v0.4 landed; npm-publish ceremony for v0.4.0 still gated on operator authorization (NPM_TOKEN). Test count: 347 → 374 / 7 todo / 0 fail across 40 files (TS); Rust cargo check + tests clean.
+
+### Added
+- **Worker-side real-replay execution for lich M5** (`src/plugins/lich/sandbox.ts`, `src/plugins/lich/sandbox-worker.mjs`) — `runSandboxedToolCallLive` now defaults to `runMode: 'worker'`, dispatching the live replay inside the forked sandbox worker for true process isolation. Worker constructs the transport from a serializable `serverDescriptor`, issues `initialize` + `tools/call`, captures the response, runs the structural diff, returns over IPC. Worker supports stdio MCP transports today; http variant flagged for v0.6 (returns explicit `spawn-error` with detail). The v0.4 in-process `transportFactory` path stays available via `runMode: 'in-process'` for hermetic tests.
+- **HMM state-shape versioning** (`src/plugins/djinn/hmm.ts`, `src/plugins/djinn/hmm-store.ts`) — `HMM_STATE_VERSION = 1` constant; `HmmStateSnapshot` carries a `version` field. `IntentHmm.fromSnapshot` returns `null` on version mismatch or `posterior.length` mismatch, forcing fresh build. Both `InMemoryHmmStore` and `PersistentHmmStore` warn-and-reset on stale records. Versionless snapshots (pre-v0.5) treated as `version: 0` → reset path. Forward-compat protocol documented inline at the constant: bump `HMM_STATE_VERSION` when state space changes (more states, renamed states, different observation buckets).
+- **Bidirectional control channel** (`src/observability/control-protocol.ts`, `inspector/src/control.rs`) — TS-side `TcpControlSink` accepts inbound commands on the same TCP connection as outbound events. New event variant `request.approval` (carrying `correlation_id / plugin / reason / phase / payload`). New outbound command `{ kind: "control.command", command: "approval.response", correlation_id, decision, reason? }`. Trust-gate phase, when configured with a `controlChannel`, emits `request.approval` and awaits the matching response with a 30-second default timeout. **Fail-closed** on timeout — operator wanted human-in-the-loop, missing decision = no human present = veto.
+  - Inspector side: `Source::SocketControl(addr)` opens a bidirectional TCP transport. New `app.state.pending_approvals` queue. Overview view renders a `PENDING APPROVAL: <plugin> — <reason>  [a]pprove  [v]eto` banner when the queue is non-empty. `a` and `v` keys serialize an `approval.response` and pop from the queue.
+  - Wire schema documented at `docs/event-schema.md` under "Bidirectional control channel (v0.5 #4)".
+
+### Changed
+- `IntentHmm.serialize` now stamps `version: HMM_STATE_VERSION` on every snapshot. Existing test snapshots get the new field automatically.
+- `Bridge` config gains an optional `kind: 'tcp-control'` for the bidirectional path. Existing `kind: 'tcp'` (one-way) stays the default for back-compat.
+- Rust `Transport` gains `send_control(line: &str)` for outbound writes; only available when constructed via `Source::SocketControl`.
+
+### Open scope (deferred to v0.6)
+- HTTP transport inside the sandbox worker (currently stdio-only; explicit error for http).
+- The `PENDING APPROVAL` banner renders only in the overview view; lifting to a shared widget consumed by `draw_app` is the obvious next slice.
+- Auto-reconnect for `Source::SocketControl` if the runtime restarts mid-session.
+- `transportDescriptor.envAllowlist` / `binaryDigest` aren't honored by the worker's stdio spawn yet; uses bare `cmd / args` and forces `env: { PATH }`.
+- npm-publish ceremony for v0.4.0 still gated on `NPM_TOKEN` setup.
+
 ## [0.4.0] — 2026-05-05
 
 Carry-overs from the v0.3.0 ship list, all landed in one cycle. Test count: 270 → 347 / 7 todo / 0 fail across 37 files. Typecheck clean. All new behavior is default-off behind config flags.

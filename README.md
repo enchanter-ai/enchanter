@@ -13,7 +13,7 @@
 
 Enchanter is a TypeScript SDK for building agentic AI applications that speak [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It wraps every outbound tool call in a 7-phase orchestrator lifecycle, runs it through an in-process event bus, and lets specialized plugins (trust scoring, drift detection, security veto, code review, structural fingerprinting, cost attribution, git workflow, and more) observe, modify, or block before the request leaves your process.
 
-**v0.4.0 — full-stack agent SDK with shipped Rust observability surface.** 347 tests / 7 todo / 0 fail across 37 files. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or TCP socket. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`. Release pipeline (`scripts/publish-packages.ts` + `.github/workflows/publish.yml`) ships on `v*.*.*` tags.
+**v0.5.0 — full-stack agent SDK with shipped Rust observability surface and human-in-the-loop control.** 374 tests / 7 todo / 0 fail across 40 files (TS); Rust check + tests clean. Observability is the Rust terminal cockpit at [`inspector/`](inspector/) — htop / btop / k9s for an AI agent runtime — consuming the runtime's JSONL event stream over stdin, file, or bidirectional TCP socket. Inspector now sends approve/veto decisions back into the orchestrator's trust-gate via a control channel. Each plugin adapter is independently installable as `@enchanter-ai/plugin-*` from `packages/`.
 
 ## Install
 
@@ -147,14 +147,23 @@ All five carry-overs from v0.3 landed:
 - **#4 Gorgon dotted-module resolution** — hand-rolled TOML parser extracts package roots from `[project]` / `[tool.poetry]` / `[tool.setuptools]` / `[tool.setuptools.packages.find]`. Roots merge additively; resolution walks `<root>/foo/bar.py` then `<root>/foo/bar/__init__.py`.
 - **#5 Plugin-package release pipeline** — `release:prep` bumps root + 10 packages in lockstep. `publish-packages.ts --dry-run` validates shape; `--publish` runs `npm publish --access public` per package, gated on `NPM_TOKEN`. CI on `v*.*.*` tags. See [`docs/RELEASE.md`](docs/RELEASE.md).
 
-## v0.5 roadmap
+## What shipped in v0.5
 
-Forward-looking work after v0.4:
+Three of four v0.5 carry-overs landed; the fourth (`npm publish`) is gated on operator authorization.
 
-1. **Worker-side real-replay execution** — currently the live-replay path runs in the parent process via injected `transportFactory`. Move it inside the forked sandbox worker for true isolation.
-2. **HMM state-shape versioning** — add a `version` field to `HmmStateSnapshot` so future state-space changes (more states, renamed states, different observation buckets) trigger a hard reset rather than silently mis-interpret.
-3. **Actual `npm publish` of v0.4.0** — release pipeline is ready; awaits `NPM_TOKEN` setup + first tag.
-4. **Inspector → bridge bidirectional control** — currently the bridge is one-way (runtime → inspector). Add an "approve" / "veto" channel from the inspector back into the orchestrator's trust-gate phase.
+- **#1 Worker-side real-replay execution** — `runSandboxedToolCallLive` defaults to `runMode: 'worker'`, dispatching the live replay inside the forked sandbox worker. True process isolation. Stdio MCP transports today; http worker variant flagged for v0.6.
+- **#2 HMM state-shape versioning** — `HMM_STATE_VERSION = 1` stamped on every snapshot. Mismatched versions or posterior lengths trigger a hard reset rather than silent corruption. Pre-v0.5 versionless snapshots treated as `v0` → reset.
+- **#4 Bidirectional control channel** — `Source::SocketControl` opens a read+write TCP transport. `request.approval` event carries `correlation_id / plugin / reason / payload`; inspector pops a `PENDING APPROVAL` banner and `a` / `v` send the decision back. Trust-gate awaits with a 30-second timeout, **fail-closed**. See `docs/event-schema.md` for the wire protocol.
+
+## v0.6 roadmap
+
+Forward-looking work after v0.5:
+
+1. **HTTP transport inside the sandbox worker** — currently stdio-only; v0.6 closes with an `import('undici')` fetch loop honoring the existing 8 MB body cap.
+2. **`PENDING APPROVAL` banner across all views** — currently only renders in overview; lift to a shared widget consumed by `draw_app`.
+3. **Auto-reconnect for `Source::SocketControl`** — runtime restart mid-session currently ends the inbound stream; add backoff + reconnect.
+4. **`transportDescriptor.envAllowlist` / `binaryDigest` honored by worker stdio spawn** — currently forces `env: { PATH }` and ignores binaryDigest.
+5. **Actual `npm publish` of v0.4.0 / v0.5.0** — release pipeline is ready; awaits `NPM_TOKEN` setup + first tag.
 
 ## Contributing
 
