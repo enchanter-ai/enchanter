@@ -132,12 +132,33 @@ impl InspectArgs {
     }
 }
 
+/// Decide what bare `enchanter` (no subcommand) should do.
+///
+/// Hierarchy:
+/// 1. stdin is piped → consume JSONL from stdin (`Source::Stdin`, which the
+///    app loop turns into demo mode iff the stdin is also a TTY but that
+///    shouldn't happen if it's piped).
+/// 2. stdin is a TTY AND `scripts/live.ts` is reachable from cwd → boot the
+///    real runtime via `Source::Exec`. This is the "boom, just works"
+///    path when the binary is run from `client/enchanter/`.
+/// 3. stdin is a TTY AND `scripts/live.ts` is NOT reachable → fall back to
+///    `Source::Stdin`, which the app loop turns into the synthetic
+///    `src/demo.rs` emitter so the cockpit still has something to render.
+fn default_command() -> Command {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() && std::path::Path::new("scripts/live.ts").is_file() {
+        Command::Live(LiveArgs::default())
+    } else {
+        Command::Inspect(InspectArgs::default())
+    }
+}
+
 /// Library entry point invoked from `main`.
 ///
 /// Builds a multi-thread tokio runtime and dispatches into `app::run`.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = match cli.command.unwrap_or(Command::Inspect(InspectArgs::default())) {
+    let config = match cli.command.unwrap_or_else(default_command) {
         Command::Inspect(args) => args.into_config(),
         Command::Live(args) => args.into_config(),
     };
