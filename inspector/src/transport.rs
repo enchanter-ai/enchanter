@@ -258,11 +258,20 @@ async fn run_exec(cmd: String, tx: mpsc::Sender<Event>) {
     use tokio::process::Command;
 
     // Resolve the runtime-log path. Best-effort — fall back to discarding
-    // stderr if we can't open the file.
+    // stderr if we can't open the file. Rotate if the existing log is over
+    // the cap so we don't grow unbounded across many `enchanter live` runs.
+    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
     let log_path = runtime_log_path();
     if let Some(ref p) = log_path {
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(meta) = std::fs::metadata(p) {
+            if meta.len() > MAX_LOG_BYTES {
+                let backup = p.with_extension("log.1");
+                let _ = std::fs::remove_file(&backup);
+                let _ = std::fs::rename(p, &backup);
+            }
         }
     }
 

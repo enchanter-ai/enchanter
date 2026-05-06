@@ -14,7 +14,7 @@ use crossterm::{
         KeyEventKind, KeyModifiers,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
 };
 use ratatui::{backend::CrosstermBackend, Frame, Terminal};
 use tokio::sync::mpsc;
@@ -71,8 +71,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let (key_tx, mut key_rx) = mpsc::channel::<CtEvent>(64);
     let _key_handle = spawn_key_reader(key_tx);
 
-    // Tick: drives idle redraws (uptime, spinners) at 4 Hz.
+    // Tick: drives idle redraws (uptime, spinners) at 4 Hz. Skip missed
+    // ticks instead of bursting — under a hot transport flood, accumulated
+    // ticks would otherwise fire back-to-back and never give the renderer a
+    // chance to actually update.
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut app = AppState::default();
     app.demo_mode = demo_mode;
@@ -97,8 +101,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             dirty = false;
         }
 
+        // Tick is checked FIRST — without this, a hot transport branch
+        // saturates the select! and uptime/animations freeze on screen even
+        // though events are flowing. Putting tick first guarantees the UI
+        // stays responsive (≤ 250ms latency) regardless of event volume.
         tokio::select! {
             biased;
+
+            _ = tick.tick() => {
+                app.bump_tick();
+                if app.tick % 240 == 0 {
+                    let (t, m) = crate::state::detect_claude_usage_today();
+                    app.session.claude_tokens_today = t;
+                    app.session.claude_messages_today = m;
+                }
+                dirty = true;
+            }
 
             maybe_input = key_rx.recv() => {
                 let Some(input) = maybe_input else { break };
@@ -123,19 +141,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
                         tracing::info!("transport stream ended");
                     }
                 }
-            }
-
-            _ = tick.tick() => {
-                app.bump_tick();
-                // Refresh Claude token/message totals every ~60s
-                // (240 ticks × 250ms). Cheap because the helper caps its
-                // own wall-clock budget.
-                if app.tick % 240 == 0 {
-                    let (t, m) = crate::state::detect_claude_usage_today();
-                    app.session.claude_tokens_today = t;
-                    app.session.claude_messages_today = m;
-                }
-                dirty = true;
             }
         }
     }
@@ -170,7 +175,14 @@ impl TerminalGuard {
     fn enter() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut out = io::stdout();
-        execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+        // Set the host terminal's title so the OS taskbar / tab strip shows
+        // "Enchanter Inspector" instead of the cmd.exe / wt.exe default.
+        execute!(
+            out,
+            SetTitle("Enchanter Inspector"),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })

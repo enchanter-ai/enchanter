@@ -26,12 +26,31 @@ fn dirs_cache_fallback() -> Option<PathBuf> {
         .map(|h| h.join(".cache"))
 }
 
+/// Cap the inspector.log size at this many bytes. On startup, if the log is
+/// larger we rotate (truncate the existing file + drop a `.1` sibling). This
+/// keeps the log useful for debugging without growing unbounded — the user's
+/// real-world install hit 40 GB before this rotation landed.
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
+
+fn rotate_log_if_needed(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if meta.len() <= MAX_LOG_BYTES {
+        return;
+    }
+    // Rotate: rename current to .1 (overwriting any existing .1), then the
+    // OpenOptions::create below will recreate the primary path empty.
+    let backup = path.with_extension("log.1");
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
+}
+
 fn init_tracing() -> anyhow::Result<()> {
     let path = log_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating log directory {}", parent.display()))?;
     }
+    rotate_log_if_needed(&path);
     let file = OpenOptions::new()
         .create(true)
         .append(true)
