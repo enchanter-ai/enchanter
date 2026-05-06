@@ -55,6 +55,8 @@
     "lint:check": "tsc --noEmit",
     "live": "tsx scripts/live.ts",
     "prepack": "npm run build",
+    "postinstall": "node scripts/hooks/install-hooks.mjs --silent || true",
+    "uninstall-hooks": "node scripts/hooks/install-hooks.mjs --uninstall",
     "stress": "tsx scripts/stress-plugins.ts",
     "red-team": "tsx scripts/red-team.ts",
     "release:dry": "tsx scripts/publish-packages.ts --dry-run",

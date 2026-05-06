@@ -36,6 +36,19 @@ const MARKER = 'enchanter:claude-code-emit'; // command substring we recognize
 
 const argv = process.argv.slice(2);
 const uninstall = argv.includes('--uninstall');
+// `--silent` is for the npm postinstall path. Stay no-op-quiet when the
+// user doesn't have Claude Code installed (`~/.claude/` directory is
+// absent), so `npm install enchanter` doesn't print scary errors for
+// users who only want the SDK/inspector and aren't using Claude Code.
+const silent = argv.includes('--silent');
+
+if (silent) {
+  const claudeDir = path.join(os.homedir(), '.claude');
+  if (!fs.existsSync(claudeDir)) {
+    // No Claude Code installation detected — exit 0 silently.
+    process.exit(0);
+  }
+}
 
 function settingsPath() {
   const home = os.homedir();
