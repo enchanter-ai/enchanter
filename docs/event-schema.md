@@ -1,14 +1,19 @@
 # Enchanter event-schema (JSONL bridge)
 
-Single source of truth for the wire format between the TypeScript runtime
-(producer) and the Rust inspector (consumer). The Rust side reads JSONL —
-one JSON object per line — over stdin, a regular file, or a TCP socket.
-This doc pins what the TS bridge (`src/observability/bridge.ts`) writes
-and what the Rust transport (`inspector/src/transport.rs`) accepts.
+Authoritative machine schema: [`event-schema.json`](./event-schema.json).
+Both sides of the wire validate every event against that file at boundary —
+the TS Bridge (`src/observability/bridge.ts`) on emit, the Rust Transport
+(`inspector/src/transport.rs`) on parse. Validation failures **drop the
+event with a logged warning** — no crash on the producer or consumer side.
 
-Rust ground truth: `inspector/src/event.rs` — variant tags, required
-fields, and the `GenericPayload` fallback are defined there. If this doc
-and that file disagree, that file wins; open a PR fixing the doc.
+This Markdown is the prose narrative; if the two ever disagree the JSON
+Schema wins for shape, and `inspector/src/event.rs` wins for type-tagged
+variant fields. Renames or new variants update all three together
+(`event.rs`, `event-schema.json`, this doc) in one PR.
+
+The Rust side reads JSONL — one JSON object per line — over stdin, a
+regular file, or a TCP socket. This doc pins what the TS bridge writes
+and what the Rust transport accepts.
 
 ## Wire envelope
 

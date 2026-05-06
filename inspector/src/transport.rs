@@ -418,6 +418,25 @@ where
 
                 match crate::event::parse_line(line) {
                     Ok(event) => {
+                        // Schema-validate after parse succeeds. Wire-shape
+                        // drift between Node (Bridge) and Rust (Transport)
+                        // surfaces here as a typed mismatch, not a silent
+                        // round-trip. Drop on mismatch with a warning —
+                        // a bad line never crashes the consumer.
+                        match serde_json::from_str::<serde_json::Value>(line) {
+                            Ok(value) => {
+                                if let Err(err) = crate::schema::validate(&value) {
+                                    tracing::warn!(line = %line, %err, "schema validation failed, dropping event");
+                                    continue;
+                                }
+                            }
+                            Err(err) => {
+                                // Should not happen — parse_line just
+                                // succeeded — but stay defensive.
+                                tracing::warn!(line = %line, %err, "schema-pass json reparse failed");
+                                continue;
+                            }
+                        }
                         if let Err(err) = tx.send(event).await {
                             tracing::debug!(%err, kind, "transport consumer dropped, exiting");
                             return;

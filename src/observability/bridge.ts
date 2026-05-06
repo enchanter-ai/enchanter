@@ -21,6 +21,7 @@ import {
   type ApprovalResponse,
   type ControlChannel,
 } from './control-protocol.js';
+import { validate as validateEvent } from './schema.js';
 
 /** Minimal one-line writer contract. Methods may return a Promise; the
  *  bridge awaits before writing the next line so backpressure is honored. */
@@ -442,9 +443,26 @@ export class Bridge {
 
   private enqueue(event: EnchantedEvent): void {
     if (this.stopped) return;
+    let record: Record<string, unknown>;
+    try {
+      record = toWireRecord(event);
+    } catch (err) {
+      this.logger('bridge serialize error', err);
+      return;
+    }
+    // Schema-validate at the boundary. Drop on mismatch with a logged
+    // warning — the bridge's contract is "every line on the wire is
+    // schema-conformant" (see docs/event-schema.json).
+    const verdict = validateEvent(record);
+    if (!verdict.ok) {
+      this.logger(
+        `bridge schema validation failed for type=${String(record.type)}: ${verdict.reason} at /${verdict.path.join('/')}`,
+      );
+      return;
+    }
     let line: string;
     try {
-      line = serializeEvent(event) + '\n';
+      line = JSON.stringify(record) + '\n';
     } catch (err) {
       this.logger('bridge serialize error', err);
       return;

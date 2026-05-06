@@ -9,6 +9,7 @@
 //! - `views`     — per-view rendering (overview, plugins, events, ...)
 
 pub mod event;
+pub mod schema;
 pub mod transport;
 pub mod state;
 pub mod app;

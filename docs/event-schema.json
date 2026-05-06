@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://enchanter.ai/schemas/event-schema.json",
+  "title": "Enchanter event-bus wire format",
+  "description": "Single source of truth for the JSONL events flowing between the TypeScript runtime (producer, src/observability/bridge.ts) and the Rust inspector (consumer, inspector/src/transport.rs). Mirrors the Rust enum in inspector/src/event.rs. Both sides validate every line against this schema and drop on mismatch with a logged warning. See docs/event-schema.md for prose context.",
+  "definitions": {
+    "phase": {
+      "type": "string",
+      "enum": [
+        "anchor",
+        "trust-gate",
+        "pre-dispatch",
+        "dispatch",
+        "post-response",
+        "post-session",
+        "cross-session"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["debug", "info", "warning", "high", "critical"]
+    },
+    "time": {
+      "type": "number",
+      "minimum": 0
+    },
+    "genericVariant": {
+      "description": "Loose-shape variants flowing through Rust GenericPayload. Required: type, time. Optional common fields are recognized; unknown fields round-trip via additionalProperties:true.",
+      "type": "object",
+      "required": ["type", "time"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "session.started",
+            "session.opened",
+            "session.closed",
+            "session.ended",
+            "phase.entered",
+            "phase.completed",
+            "plugin.loaded",
+            "plugin.health",
+            "tool.result",
+            "tool.error",
+            "sylph.veto",
+            "crow.trust",
+            "djinn.anchor",
+            "djinn.drift",
+            "gorgon.hotspot",
+            "naga.spec_check",
+            "lich.review",
+            "emu.context_update",
+            "task.created",
+            "task.started",
+            "task.blocked",
+            "task.completed",
+            "task.failed",
+            "code.generated",
+            "file.created",
+            "file.modified",
+            "test.run",
+            "test.passed",
+            "test.failed",
+            "pr.created"
+          ]
+        },
+        "time": { "$ref": "#/definitions/time" },
+        "session_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "severity": { "$ref": "#/definitions/severity" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "oneOf": [
+    {
+      "title": "runtime.metrics",
+      "type": "object",
+      "required": [
+        "type",
+        "time",
+        "open_sessions",
+        "ongoing_tasks",
+        "queued_tasks",
+        "blocked_tasks",
+        "code_written_lifetime_loc",
+        "code_modified_lifetime_loc",
+        "files_created_lifetime",
+        "files_modified_lifetime",
+        "tool_calls_lifetime",
+        "prs_created_lifetime",
+        "tests_run_lifetime",
+        "tests_passed_rate",
+        "total_spend_lifetime"
+      ],
+      "properties": {
+        "type": { "const": "runtime.metrics" },
+        "time": { "$ref": "#/definitions/time" },
+        "open_sessions": { "type": "number", "minimum": 0 },
+        "ongoing_tasks": { "type": "number", "minimum": 0 },
+        "queued_tasks": { "type": "number", "minimum": 0 },
+        "blocked_tasks": { "type": "number", "minimum": 0 },
+        "code_written_lifetime_loc": { "type": "number", "minimum": 0 },
+        "code_modified_lifetime_loc": { "type": "number", "minimum": 0 },
+        "files_created_lifetime": { "type": "number", "minimum": 0 },
+        "files_modified_lifetime": { "type": "number", "minimum": 0 },
+        "tool_calls_lifetime": { "type": "number", "minimum": 0 },
+        "prs_created_lifetime": { "type": "number", "minimum": 0 },
+        "tests_run_lifetime": { "type": "number", "minimum": 0 },
+        "tests_passed_rate": { "type": "number" },
+        "total_spend_lifetime": { "type": "number" },
+        "session_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "tool.call",
+      "type": "object",
+      "required": ["type", "time", "tool", "payload"],
+      "properties": {
+        "type": { "const": "tool.call" },
+        "time": { "$ref": "#/definitions/time" },
+        "tool": { "type": "string" },
+        "payload": { "type": "object" },
+        "session_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "hydra.veto",
+      "type": "object",
+      "required": ["type", "time", "policy", "reason", "action", "severity", "payload"],
+      "properties": {
+        "type": { "const": "hydra.veto" },
+        "time": { "$ref": "#/definitions/time" },
+        "policy": { "type": "string" },
+        "reason": { "type": "string" },
+        "action": { "type": "string" },
+        "severity": { "$ref": "#/definitions/severity" },
+        "payload": {},
+        "session_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "workspace": { "type": "string" },
+        "env": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "pech.ledger",
+      "type": "object",
+      "required": ["type", "time", "payload"],
+      "properties": {
+        "type": { "const": "pech.ledger" },
+        "time": { "$ref": "#/definitions/time" },
+        "payload": {
+          "type": "object",
+          "required": [
+            "input_tokens",
+            "output_tokens",
+            "cost_usd",
+            "session_cost_usd",
+            "daily_cost_usd"
+          ],
+          "properties": {
+            "input_tokens": { "type": "number", "minimum": 0 },
+            "output_tokens": { "type": "number", "minimum": 0 },
+            "cost_usd": { "type": "number" },
+            "session_cost_usd": { "type": "number" },
+            "daily_cost_usd": { "type": "number" }
+          },
+          "additionalProperties": true
+        },
+        "session_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "task.updated",
+      "type": "object",
+      "required": ["type", "time", "task_id", "session_id", "age_seconds"],
+      "properties": {
+        "type": { "const": "task.updated" },
+        "time": { "$ref": "#/definitions/time" },
+        "task_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "age_seconds": { "type": "number", "minimum": 0 },
+        "status": { "type": "string" },
+        "intent": { "type": "string" },
+        "file_or_area": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "risk": { "type": "string" },
+        "plugin": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "code.modified",
+      "type": "object",
+      "required": ["type", "time", "file", "lines_added", "lines_removed", "lines_modified"],
+      "properties": {
+        "type": { "const": "code.modified" },
+        "time": { "$ref": "#/definitions/time" },
+        "file": { "type": "string" },
+        "language": { "type": "string" },
+        "lines_added": { "type": "number", "minimum": 0 },
+        "lines_removed": { "type": "number", "minimum": 0 },
+        "lines_modified": { "type": "number", "minimum": 0 },
+        "session_id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    {
+      "title": "request.approval",
+      "description": "v0.5 #4 control inbound — runtime asks the inspector for a human verdict.",
+      "type": "object",
+      "required": ["type", "time", "correlation_id", "plugin", "reason"],
+      "properties": {
+        "type": { "const": "request.approval" },
+        "time": { "$ref": "#/definitions/time" },
+        "correlation_id": { "type": "string" },
+        "plugin": { "type": "string" },
+        "reason": { "type": "string" },
+        "phase": { "$ref": "#/definitions/phase" },
+        "session_id": { "type": "string" },
+        "payload": {},
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    { "$ref": "#/definitions/genericVariant" }
+  ],
+  "outboundCommands": {
+    "description": "Outbound command shapes flow inspector -> runtime on the same socket. Discriminator is `kind`, not `type`. Validated by validateCommand on the TS side and (currently) parsed via runtime control-protocol on the Rust side.",
+    "oneOf": [
+      {
+        "title": "control.command / approval.response",
+        "type": "object",
+        "required": ["kind", "command", "correlation_id", "decision"],
+        "properties": {
+          "kind": { "const": "control.command" },
+          "command": { "const": "approval.response" },
+          "correlation_id": { "type": "string" },
+          "decision": { "type": "string", "enum": ["approve", "veto"] },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    ]
+  }
+}
