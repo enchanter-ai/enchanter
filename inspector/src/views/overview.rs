@@ -929,6 +929,8 @@ fn event_phase(ev: &Event) -> Option<String> {
         | Event::TestFailed(p)
         | Event::PrCreated(p) => p.phase.clone(),
 
+        Event::Unknown(p) => p.phase.clone(),
+
         Event::RuntimeMetrics { .. } | Event::CodeModified { .. } => None,
     }
 }

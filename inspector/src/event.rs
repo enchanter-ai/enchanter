@@ -267,6 +267,15 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
     },
+    /// Catch-all for events whose `type` discriminator isn't in the explicit
+    /// list above. The producer (TS bridge) emits many `lifecycle.*`,
+    /// `mcp.tool.*`, `*.appended`, `*.fired`, `*.scored` event names that the
+    /// Rust enum hasn't enumerated. Without this, `parse_line` would error and
+    /// the transport's malformed-line counter would tick on every emit.
+    /// Populated by `parse_line` via fallback parse to `GenericPayload` —
+    /// never by direct serde dispatch (hence `#[serde(skip)]`).
+    #[serde(skip)]
+    Unknown(GenericPayload),
 }
 
 impl Event {
@@ -280,6 +289,8 @@ impl Event {
             | Event::TaskUpdated { time, .. }
             | Event::CodeModified { time, .. }
             | Event::RequestApproval { time, .. } => *time,
+
+            Event::Unknown(p) => p.time,
 
             Event::SessionStarted(p)
             | Event::SessionOpened(p)
@@ -354,6 +365,7 @@ impl Event {
             Event::TestFailed(_) => "test.failed",
             Event::PrCreated(_) => "pr.created",
             Event::RequestApproval { .. } => "request.approval",
+            Event::Unknown(_) => "unknown",
         }
     }
 
@@ -400,6 +412,8 @@ impl Event {
             | Event::TestPassed(p)
             | Event::TestFailed(p)
             | Event::PrCreated(p) => p.plugin.as_deref(),
+
+            Event::Unknown(p) => p.plugin.as_deref(),
         }
     }
 
@@ -446,6 +460,8 @@ impl Event {
             | Event::TestPassed(p)
             | Event::TestFailed(p)
             | Event::PrCreated(p) => p.session_id.as_deref(),
+
+            Event::Unknown(p) => p.session_id.as_deref(),
         }
     }
 
@@ -492,6 +508,8 @@ impl Event {
             | Event::TestPassed(p)
             | Event::TestFailed(p)
             | Event::PrCreated(p) => p.task_id.as_deref(),
+
+            Event::Unknown(p) => p.task_id.as_deref(),
         }
     }
 
@@ -537,6 +555,8 @@ impl Event {
             | Event::TestPassed(p)
             | Event::TestFailed(p)
             | Event::PrCreated(p) => p.severity,
+
+            Event::Unknown(p) => p.severity,
         }
     }
 }
@@ -544,8 +564,20 @@ impl Event {
 /// Tolerant single-line parser. Bubbles up errors (including unknown
 /// discriminants) so the caller can log and skip, never panic.
 pub fn parse_line(line: &str) -> anyhow::Result<Event> {
-    let event = serde_json::from_str::<Event>(line)?;
-    Ok(event)
+    // Try the strict tagged-enum parse first.
+    match serde_json::from_str::<Event>(line) {
+        Ok(event) => Ok(event),
+        Err(strict_err) => {
+            // Fall back to GenericPayload for events whose `type` discriminator
+            // isn't in our explicit variant list. The producer emits many event
+            // names (`lifecycle.*`, `mcp.tool.*`, `*.appended`, `*.fired`) that
+            // we don't model individually but still want to surface in the UI.
+            match serde_json::from_str::<GenericPayload>(line) {
+                Ok(payload) => Ok(Event::Unknown(payload)),
+                Err(_) => Err(anyhow::Error::from(strict_err).context("event parse failed")),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
