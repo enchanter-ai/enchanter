@@ -1335,11 +1335,19 @@ impl AppState {
 
             // ---- per-plugin display updates ----------------------------
             Event::EmuContextUpdate(p) => {
-                let turn = p.extra.get("turn_estimate")
+                let turn_n = p
+                    .extra
+                    .get("turn_estimate")
                     .and_then(|v| v.as_i64())
+                    .filter(|n| *n >= 0)
+                    .map(|n| n as u32);
+                let turn_str = turn_n
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "?".into());
-                self.set_plugin_display("emu", format!("{turn}±3"));
+                self.set_plugin_display("emu", format!("{turn_str}±3"));
+                if let Some(n) = turn_n {
+                    self.metrics.turns = (n, 3);
+                }
                 if let Some(ctx) = p.extra.get("context_size").and_then(|v| v.as_u64()) {
                     self.push_plugin_usage("emu", ctx);
                 }
@@ -1776,13 +1784,14 @@ impl AppState {
                 // Round-3 fix A: when emu.context_update arrives via the
                 // Unknown fallback path (shape variation, downgraded enum),
                 // mirror the typed handler — bump calls, set last_event,
-                // refresh display from `turn_estimate`.
+                // refresh display from `turn_estimate`, write metrics.turns.
                 let turn = p
                     .extra
                     .get("turn_estimate")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(25);
+                    .unwrap_or(25) as u32;
                 self.set_plugin_display("emu", format!("{turn}±3 turns"));
+                self.metrics.turns = (turn, 3);
                 if let Some(idx) = self.plugin_index_by_name("emu") {
                     let plug = &mut self.plugins[idx];
                     plug.calls = plug.calls.saturating_add(1);
