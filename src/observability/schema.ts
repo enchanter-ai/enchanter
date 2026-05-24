@@ -111,6 +111,20 @@ function branchTypeMatches(branch: SchemaNode, value: unknown): boolean {
   return false;
 }
 
+/** Is this branch a strict-discriminator branch (its `type` property pins a
+ *  single `const`)? Used to enforce no-fallthrough: when the input's `type`
+ *  matches a strict branch's const, only that branch may match — we will not
+ *  fall through to the generic permissive variant. Mirrors the Rust
+ *  serde(tag = "type") enum dispatch in inspector/src/event.rs, which has no
+ *  #[serde(other)] catch-all. */
+function branchIsStrictConst(branch: SchemaNode): boolean {
+  const properties = branch.properties as Record<string, SchemaNode> | undefined;
+  if (!properties) return false;
+  const typeSchema = properties.type;
+  if (!typeSchema) return false;
+  return Object.prototype.hasOwnProperty.call(typeSchema, 'const');
+}
+
 function ok(): ValidationResult {
   return { ok: true };
 }
@@ -184,27 +198,44 @@ function check(node: SchemaNode, value: unknown, path: string[]): ValidationResu
     }
   }
 
-  // oneOf — first match wins. If none match, prefer the failure from the
-  // branch whose `type` discriminator (const or enum) matched the input —
-  // that's the branch the producer "intended" to satisfy. Otherwise fall
-  // back to the deepest-path failure.
+  // oneOf — discriminator-aware. If a strict-const branch matches the
+  // input's `type` field, only that branch is allowed: failures there
+  // do NOT fall through to the generic permissive variant. This mirrors
+  // the Rust serde(tag = "type") enum dispatch on the consumer side and
+  // closes a hole where malformed strict events (missing required fields,
+  // wrong-type values) were silently rescued by the generic branch.
+  //
+  // When no strict branch's discriminator matches, the generic branch is
+  // tried; its own `type` enum decides whether the event is a known generic
+  // discriminator or an unknown event class that must be rejected.
   if (Array.isArray(schema.oneOf)) {
+    const branches = schema.oneOf as SchemaNode[];
+
+    // Look for a strict-const branch whose const matches the input's type.
+    for (const rawBranch of branches) {
+      const branch = deref(rawBranch);
+      if (branchIsStrictConst(branch) && branchTypeMatches(branch, value)) {
+        // Locked in: this is the only branch allowed to match. Return its
+        // result verbatim — no fallthrough to other branches (incl. generic).
+        const result = check(branch, value, path);
+        return result.ok ? ok() : result;
+      }
+    }
+
+    // No strict branch claimed this `type`. Try every remaining branch
+    // (non-strict-const, i.e. the generic variant). Pick the deepest-path
+    // failure as the best diagnostic if none match.
     let bestFail: ValidationResult | null = null;
-    let bestIntended = false;
-    for (const branch of schema.oneOf) {
-      const result = check(branch as SchemaNode, value, path);
+    for (const rawBranch of branches) {
+      const branch = deref(rawBranch);
+      if (branchIsStrictConst(branch)) continue; // already eliminated above
+      const result = check(branch, value, path);
       if (result.ok) return ok();
-      const intended = branchTypeMatches(deref(branch as SchemaNode), value);
-      const replace =
+      if (
         bestFail === null ||
-        (intended && !bestIntended) ||
-        (intended === bestIntended &&
-          !bestFail.ok &&
-          !result.ok &&
-          result.path.length > bestFail.path.length);
-      if (replace) {
+        (!bestFail.ok && !result.ok && result.path.length > bestFail.path.length)
+      ) {
         bestFail = result;
-        bestIntended = intended;
       }
     }
     if (bestFail !== null) return bestFail;
